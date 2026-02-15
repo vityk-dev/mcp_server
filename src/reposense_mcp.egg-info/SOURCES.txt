@@ -9,6 +9,10 @@ src/reposense_mcp.egg-info/dependency_links.txt
 src/reposense_mcp.egg-info/requires.txt
 src/reposense_mcp.egg-info/top_level.txt
 src/reposense_mcp/github/__init__.py
+src/reposense_mcp/github/auth_device.py
+src/reposense_mcp/github/config.py
+src/reposense_mcp/github/test_github_device_flow.py
+src/reposense_mcp/github/token_store.py
 src/reposense_mcp/mcp/__init__.py
 src/reposense_mcp/mcp/handlers.py
 src/reposense_mcp/mcp/protocol.py
