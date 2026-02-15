@@ -118,6 +118,20 @@ async def github_repo_snapshot(
     # Only blobs (files)
     blobs = [t for t in tree if t.get("type") == "blob" and t.get("path")]
     paths = [t["path"] for t in blobs]
+    from collections import Counter
+    exts = Counter()
+    top_dirs = Counter()
+
+    for p in paths:
+        # extension stats
+        if "." in p.rsplit("/", 1)[-1]:
+            exts[p.rsplit(".", 1)[-1].lower()] += 1
+        else:
+            exts["(no_ext)"] += 1
+
+        # top dir stats
+        top = p.split("/", 1)[0] if "/" in p else "(root)"
+        top_dirs[top] += 1
 
     # ---- Heuristics: rank important files ----
     priority_exact = [
@@ -223,6 +237,12 @@ async def github_repo_snapshot(
             entrypoints.append(c)
 
     return {
+        "stats": {
+        "total_items": len(tree),
+        "total_files": len(paths),
+        "top_dirs": top_dirs.most_common(20),
+        "extensions": exts.most_common(30),
+        },
         "owner": owner,
         "repo": repo,
         "ref": ref,
