@@ -10,6 +10,8 @@ DEFAULT_DENY_PATTERNS = [
     "*.key",
     "id_rsa",
     "id_ed25519",
+    ".npmrc",
+    ".pypirc",
 ]
 
 
