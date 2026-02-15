@@ -7,3 +7,6 @@ def test_health():
     r = c.get("/health")
     assert r.status_code == 200
     assert r.json()["ok"] is True
+    
+def test_imports():
+    import reposense_mcp.security.policy
