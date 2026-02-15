@@ -14,6 +14,9 @@ api = FastAPI(title="RepoSense MCP", version="0.1.0", lifespan=mcp_app.lifespan)
 def health():
     return {"ok": True}
 
+@api.get("/")
+def root():
+    return {"ok": True, "health": "/health", "mcp": "/mcp"}
 
 # MCP endpoint becomes: http://localhost:8000/mcp
 api.mount("/mcp", mcp_app)

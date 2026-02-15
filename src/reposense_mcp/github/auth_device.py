@@ -9,7 +9,12 @@ import httpx
 from reposense_mcp.github.config import GitHubOAuthConfig
 from reposense_mcp.github.token_store import TokenData, TokenStore
 
-
+def _http_error_details(e: httpx.HTTPStatusError) -> str:
+        r = e.response
+        try:
+            return f"status={r.status_code} url={r.request.url} body={r.text}"
+        except Exception:
+            return f"status={r.status_code} url={r.request.url} (no body)"
 @dataclass(frozen=True)
 class DeviceCode:
     device_code: str
@@ -26,12 +31,19 @@ class GitHubDeviceAuth:
 
     async def start(self) -> DeviceCode:
         async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(
-                self.cfg.device_code_url,
-                data={"client_id": self.cfg.client_id},
-                headers={"Accept": "application/json"},
-            )
-            r.raise_for_status()
+            try:
+                r = await client.post(
+                    self.cfg.device_code_url,
+                    params={"client_id": self.cfg.client_id},  # per GitHub docs  [oai_citation:1‡GitHub Docs](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app)
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                )
+                r.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                raise RuntimeError(f"GitHub device/code failed: {_http_error_details(e)}") from e
+
             j = r.json()
 
         return DeviceCode(
@@ -85,7 +97,9 @@ class GitHubDeviceAuth:
             return "expired", {"error": err}
 
         return "error", {"error": err or "unknown", "error_description": j.get("error_description")}
+    
 
+    
     def status(self) -> Dict[str, Any]:
         token = self.store.load()
         return {"authorized": bool(token), "token": (token.__dict__ if token else None)}
