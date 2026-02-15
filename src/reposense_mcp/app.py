@@ -1,16 +1,19 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
-from reposense_mcp.mcp.handlers import handle_mcp_request
 
-app = FastAPI(title="RepoSense MCP", version="0.1.0")
+from reposense_mcp.server import mcp
 
-@app.get("/health")
+# Create MCP ASGI app with path="/" since we mount at /mcp
+mcp_app = mcp.http_app(path="/")
+
+# IMPORTANT: FastMCP requires passing its lifespan into the web framework
+# so the session manager initializes correctly.
+api = FastAPI(title="RepoSense MCP", version="0.1.0", lifespan=mcp_app.lifespan)
+
+
+@api.get("/health")
 def health():
     return {"ok": True}
 
-class MCPEnvelope(BaseModel):
-    payload: dict
 
-@app.post("/mcp")
-async def mcp(envelope: MCPEnvelope):
-    return await handle_mcp_request(envelope.payload)
+# MCP endpoint becomes: http://localhost:8000/mcp
+api.mount("/mcp", mcp_app)

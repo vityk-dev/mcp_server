@@ -1,13 +1,22 @@
-from fastapi.testclient import TestClient
-from reposense_mcp.app import app
+import pytest
+from fastmcp.client import Client
 
-def test_list_tools():
-    c = TestClient(app)
-    r = c.post("/mcp", json={"payload": {"action": "list_tools", "params": {}}})
-    assert r.status_code == 200
-    assert r.json()["ok"] is True
+from reposense_mcp.server import mcp
 
-def test_ping():
-    c = TestClient(app)
-    r = c.post("/mcp", json={"payload": {"action": "call_tool", "params": {"name": "ping", "arguments": {"msg": "hi"}}}})
-    assert r.status_code == 200
+
+@pytest.fixture
+async def mcp_client():
+    async with Client(transport=mcp) as client:
+        yield client
+
+
+async def test_list_tools(mcp_client: Client):
+    tools = await mcp_client.list_tools()
+    assert any(t.name == "ping" for t in tools)
+
+
+async def test_ping(mcp_client: Client):
+    result = await mcp_client.call_tool(name="ping", arguments={"message": "hi"})
+    assert result.data is not None
+    assert result.data["pong"] is True
+    assert result.data["message"] == "hi"
