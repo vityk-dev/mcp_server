@@ -11,18 +11,54 @@ from reposense_mcp.errors import RepoSenseError
 from reposense_mcp.github.auth_device import GitHubDeviceAuth
 from reposense_mcp.github.client import GitHubClient
 from reposense_mcp.github.config import load_github_oauth_config
-from reposense_mcp.logging_config import get_logger
-from reposense_mcp.mcp.context import get_request_id
 from reposense_mcp.mcp.response import err, ok
 from reposense_mcp.security.policy import RepoPolicy
+from reposense_mcp.logging_config import get_logger, new_request_id
+from reposense_mcp.mcp.context import get_request_id, set_request_id
 
 log = get_logger("reposense_mcp.tools")
 
 mcp = FastMCP("RepoSense MCP")
 
 
-def _log_tool(tool: str, start: float, result: dict, **fields: Any) -> None:
+def _resolve_request_id() -> str:
+    """Resolve a request id for logging.
+
+    Priority:
+      1) Existing contextvar (set by FastAPI middleware or tests)
+      2) HTTP header `x-request-id` if running under Streamable HTTP
+      3) Generate a new id
+
+    Note: We only set the contextvar if it's missing so we never overwrite a
+    caller-provided request id.
+    """
+
     rid = get_request_id()
+    if rid:
+        return rid
+
+    # If invoked via FastMCP HTTP transport, try to read incoming headers.
+    try:
+        from fastmcp.server.dependencies import get_http_headers  # type: ignore
+
+        headers = get_http_headers() or {}
+        # Be defensive about header casing.
+        rid = headers.get("x-request-id") or headers.get("X-Request-Id")
+        if rid:
+            set_request_id(rid)
+            return rid
+    except Exception:
+        # No HTTP context available (or fastmcp internals changed). Fall back.
+        pass
+
+    rid = new_request_id()
+    set_request_id(rid)
+    return rid
+
+
+def _log_tool(tool: str, start: float, result: dict, **fields: Any) -> None:
+    rid = _resolve_request_id()
+
     elapsed_ms = int((time.perf_counter() - start) * 1000)
     okv = bool(result.get("ok"))
 

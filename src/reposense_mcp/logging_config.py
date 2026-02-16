@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import time
 import uuid
-from typing import Any, Callable, Dict
+from typing import Any, Dict
 
 import structlog
 
@@ -28,14 +27,25 @@ def _add_level(_: Any, __: str, event_dict: Dict[str, Any]) -> Dict[str, Any]:
 def configure_logging() -> None:
     """
     Configure stdlib logging + structlog for JSON logs.
-    Safe to call multiple times (idempotent enough for dev reload).
+
+    Important:
+    - Do NOT nuke existing handlers (pytest caplog adds its own handler).
+    - Remove only our stdout StreamHandler(s) to avoid duplicates on reload/tests.
     """
     level_name = (settings.log_level or "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
 
     root = logging.getLogger()
-    root.handlers.clear()
     root.setLevel(level)
+
+    # Keep non-stdout handlers (e.g., pytest caplog) intact.
+    # Remove only StreamHandlers that write to sys.stdout, then re-add ours once.
+    kept: list[logging.Handler] = []
+    for h in root.handlers:
+        if isinstance(h, logging.StreamHandler) and getattr(h, "stream", None) is sys.stdout:
+            continue
+        kept.append(h)
+    root.handlers = kept
 
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(level)
