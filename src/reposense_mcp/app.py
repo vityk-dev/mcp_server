@@ -5,8 +5,8 @@ import time
 from fastapi import FastAPI
 
 from reposense_mcp.logging_config import configure_logging, get_logger, new_request_id
-from reposense_mcp.mcp.context import set_request_id
 from reposense_mcp.server import mcp
+from reposense_mcp.mcp.context import set_request_id, clear_request_id
 
 
 def create_api() -> FastAPI:
@@ -51,6 +51,9 @@ def create_api() -> FastAPI:
                 elapsed_ms=elapsed_ms,
             )
             raise
+        finally:
+            # Prevent rid bleed between requests (important for tests + correctness)
+            clear_request_id()
 
     @api.get("/health")
     def health():

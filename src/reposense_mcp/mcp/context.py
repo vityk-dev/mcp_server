@@ -11,6 +11,20 @@ def set_request_id(rid: str) -> None:
     _request_id.set(rid)
 
 
-def get_request_id() -> str:
+def clear_request_id() -> None:
+    _request_id.set(None)
+
+
+def get_request_id() -> str | None:
+    """Return current rid if set, otherwise None (do NOT generate here)."""
+    return _request_id.get()
+
+
+def ensure_request_id() -> str:
+    """Return rid; generate + store one if missing."""
     rid = _request_id.get()
-    return rid or uuid.uuid4().hex
+    if rid:
+        return rid
+    rid = uuid.uuid4().hex
+    _request_id.set(rid)
+    return rid

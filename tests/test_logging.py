@@ -93,18 +93,16 @@ def test_mcp_tool_call_reuses_http_x_request_id(caplog):
         )
         assert r1.status_code in (200, 202)
 
-        # ✅ FIX: define logs
         logs = _json_logs(caplog)
-
-        expected_rids = {"rid_mcp_1", "rid_mcp_2"}
         tool_logs = [
             e
             for e in logs
             if e.get("event") == "tool_call"
             and e.get("tool") == "ping"
-            and e.get("rid") in expected_rids
+            and e.get("rid") == "rid_mcp_2"
         ]
         assert len(tool_logs) == 1
+
 
 @pytest.fixture
 async def mcp_client():
@@ -157,6 +155,7 @@ async def test_github_client_error_log_has_rid_and_no_token(caplog, monkeypatch,
     )
 
     from reposense_mcp.github.client import GitHubClient
+
     gh = GitHubClient()
 
     with pytest.raises(RuntimeError):

@@ -14,43 +14,44 @@ from reposense_mcp.github.config import load_github_oauth_config
 from reposense_mcp.mcp.response import err, ok
 from reposense_mcp.security.policy import RepoPolicy
 from reposense_mcp.logging_config import get_logger, new_request_id
-from reposense_mcp.mcp.context import get_request_id, set_request_id
+from reposense_mcp.mcp.context import get_request_id, set_request_id, ensure_request_id
 
 log = get_logger("reposense_mcp.tools")
 
 mcp = FastMCP("RepoSense MCP")
 
+# in src/reposense_mcp/server.py
+
+from reposense_mcp.mcp.context import get_request_id, set_request_id
+from reposense_mcp.logging_config import new_request_id
 
 def _resolve_request_id() -> str:
-    """Resolve a request id for logging.
+    """
+    Resolve a request id for logging.
 
     Priority:
-      1) Existing contextvar (set by FastAPI middleware or tests)
-      2) HTTP header `x-request-id` if running under Streamable HTTP
-      3) Generate a new id
-
-    Note: We only set the contextvar if it's missing so we never overwrite a
-    caller-provided request id.
+      1) If running under Streamable HTTP: use incoming x-request-id header (and set contextvar)
+      2) Otherwise: use existing contextvar if present
+      3) Otherwise: generate + set
     """
-
-    rid = get_request_id()
-    if rid:
-        return rid
-
-    # If invoked via FastMCP HTTP transport, try to read incoming headers.
+    # 1) Prefer HTTP header when present (this fixes the rid_mcp_2 test)
     try:
         from fastmcp.server.dependencies import get_http_headers  # type: ignore
-
         headers = get_http_headers() or {}
-        # Be defensive about header casing.
-        rid = headers.get("x-request-id") or headers.get("X-Request-Id")
+        headers_l = {str(k).lower(): v for k, v in headers.items()}
+        rid = headers_l.get("x-request-id")
         if rid:
             set_request_id(rid)
             return rid
     except Exception:
-        # No HTTP context available (or fastmcp internals changed). Fall back.
         pass
 
+    # 2) If already set in context, reuse it
+    rid = get_request_id()
+    if rid:
+        return rid
+
+    # 3) Generate new
     rid = new_request_id()
     set_request_id(rid)
     return rid
