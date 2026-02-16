@@ -11,6 +11,7 @@ class Settings(BaseSettings):
 
     github_app_client_id: str | None = None
     github_app_client_secret: str | None = None
+    github_log_success: bool = False
 
 
 settings = Settings()
