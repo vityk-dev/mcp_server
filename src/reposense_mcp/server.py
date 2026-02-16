@@ -15,6 +15,8 @@ from reposense_mcp.mcp.response import err, ok
 from reposense_mcp.security.policy import RepoPolicy
 from reposense_mcp.logging_config import get_logger, new_request_id
 from reposense_mcp.mcp.context import get_request_id, set_request_id, ensure_request_id
+from reposense_mcp.cache import default_cache
+from reposense_mcp.config import settings
 
 log = get_logger("reposense_mcp.tools")
 
@@ -83,6 +85,33 @@ def ping(message: Optional[str] = None) -> Dict[str, Any]:
     _log_tool("ping", start, out)
     return out
 
+@mcp.tool
+def github_cache_stats() -> Dict[str, Any]:
+    start = time.perf_counter()
+    try:
+        ttl = float(getattr(settings, "cache_ttl_seconds", 30.0))
+        cache = default_cache(ttl_seconds=ttl)
+        out = ok(cache.stats())
+    except Exception as e:
+        out = err(e)
+
+    _log_tool("github_cache_stats", start, out)
+    return out
+
+
+@mcp.tool
+def github_cache_clear() -> Dict[str, Any]:
+    start = time.perf_counter()
+    try:
+        ttl = float(getattr(settings, "cache_ttl_seconds", 30.0))
+        cache = default_cache(ttl_seconds=ttl)
+        cache.clear()
+        out = ok({"cleared": True})
+    except Exception as e:
+        out = err(e)
+
+    _log_tool("github_cache_clear", start, out)
+    return out
 
 @mcp.tool
 async def github_auth_start() -> Dict[str, Any]:
@@ -148,7 +177,7 @@ def github_auth_logout() -> Dict[str, Any]:
 
 
 @mcp.tool
-async def github_repo_tree(owner: str, repo: str, ref: str = "main", max_items: int = 5000) -> dict:
+async def github_repo_tree(owner: str, repo: str, ref: str = "main", max_items: int = 5000, no_cache:bool = False) -> dict:
     start = time.perf_counter()
     try:
         gh = GitHubClient()
@@ -373,7 +402,23 @@ async def github_read_excerpt(
     _log_tool("github_read_excerpt", start, out, owner=owner, repo=repo, ref=ref, path=path)
     return out
 
+@mcp.tool
+def github_auth_logout() -> Dict[str, Any]:
+    start = time.perf_counter()
+    try:
+        auth = GitHubDeviceAuth(load_github_oauth_config())
+        logout_result = auth.logout()
 
+        ttl = float(getattr(settings, "cache_ttl_seconds", 30.0))
+        cache = default_cache(ttl_seconds=ttl)
+        cache.clear()
+
+        out = ok({**logout_result, "cache_cleared": True})
+    except Exception as e:
+        out = err(e)
+
+    _log_tool("github_auth_logout", start, out)
+    return out
 @mcp.tool
 async def github_repo_snapshot(
     owner: str,

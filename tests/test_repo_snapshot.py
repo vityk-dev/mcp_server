@@ -32,8 +32,11 @@ async def test_repo_snapshot_selects_and_reads(mcp_client, monkeypatch, tmp_path
         return_value=httpx.Response(200, json={"object": {"sha": "abc123"}})
     )
 
-    # sha -> tree
-    respx.get("https://api.github.com/repos/acme/demo/git/trees/abc123").mock(
+    # sha -> tree (the client requests recursive=1)
+    respx.get(
+        "https://api.github.com/repos/acme/demo/git/trees/abc123",
+        params={"recursive": "1"},
+    ).mock(
         return_value=httpx.Response(
             200,
             json={
@@ -58,9 +61,20 @@ async def test_repo_snapshot_selects_and_reads(mcp_client, monkeypatch, tmp_path
             },
         )
 
-    respx.get("https://api.github.com/repos/acme/demo/contents/readme.md").mock(return_value=contents_resp("hello"))
-    respx.get("https://api.github.com/repos/acme/demo/contents/pyproject.toml").mock(return_value=contents_resp("[project]\nname='x'\n"))
-    respx.get("https://api.github.com/repos/acme/demo/contents/src/main.py").mock(return_value=contents_resp("print('x')\n"))
+    respx.get(
+        "https://api.github.com/repos/acme/demo/contents/readme.md",
+        params={"ref": "main"},
+    ).mock(return_value=contents_resp("hello"))
+
+    respx.get(
+        "https://api.github.com/repos/acme/demo/contents/pyproject.toml",
+        params={"ref": "main"},
+    ).mock(return_value=contents_resp("[project]\nname='x'\n"))
+
+    respx.get(
+        "https://api.github.com/repos/acme/demo/contents/src/main.py",
+        params={"ref": "main"},
+    ).mock(return_value=contents_resp("print('x')\n"))
 
     r = await mcp_client.call_tool(
         "github_repo_snapshot",

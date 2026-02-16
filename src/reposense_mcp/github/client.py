@@ -9,8 +9,9 @@ import httpx
 
 from reposense_mcp.github.token_store import TokenStore
 from reposense_mcp.logging_config import get_logger
-from reposense_mcp.mcp.context import get_request_id
+from reposense_mcp.mcp.context import ensure_request_id
 from reposense_mcp.config import settings
+from reposense_mcp.cache import default_cache, make_key
 
 log = get_logger("reposense_mcp.github")
 
@@ -26,19 +27,19 @@ class GitHubClient:
         self.cfg = cfg or GitHubClientConfig()
         self.store = store or TokenStore()
 
+        self._cache = None
+        if getattr(settings, "cache_enabled", True):
+            ttl = float(getattr(settings, "cache_ttl_seconds", 300.0))
+            self._cache = default_cache(ttl_seconds=ttl)
+
     def _token(self) -> str:
         token = self.store.load()
         if not token or not token.access_token:
-            # Don't log the token; just correlate the event.
-            log.warning(
-                "github_not_authorized",
-                rid=get_request_id(),
-            )
+            log.warning("github_not_authorized", rid=ensure_request_id())
             raise RuntimeError("Not authorized. Run github_auth_start + github_auth_poll first.")
         return token.access_token
 
     def _headers(self) -> Dict[str, str]:
-        # GitHub recommends this header set for API usage.
         return {
             "Authorization": f"Bearer {self._token()}",
             "Accept": "application/vnd.github+json",
@@ -52,6 +53,21 @@ class GitHubClient:
         if len(r) < 7:
             return False
         return all(c in "0123456789abcdef" for c in r)
+
+    def _cache_get(self, key: str) -> Optional[Any]:
+        if not self._cache:
+            return None
+        return self._cache.get(key)
+
+    def _cache_set(self, key: str, value: Any) -> None:
+        if not self._cache:
+            return
+        self._cache.set(key, value)
+    
+    def _cache_log(self, event: str, **fields: Any) -> None:
+        if not getattr(settings, "cache_log_events", False):
+            return
+        log.info(event, rid=ensure_request_id(), **fields)
 
     def _log_http_error(
         self,
@@ -68,15 +84,13 @@ class GitHubClient:
         path: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> None:
-        # Keep logs safe + compact. No secrets. No content.
-        # Truncate body so it doesn't explode your logs.
         body_out = (body or "").strip()
         if len(body_out) > 800:
             body_out = body_out[:800] + "…"
 
         log.warning(
             "github_http_error",
-            rid=get_request_id(),
+            rid=ensure_request_id(),
             action=action,
             method=method,
             url=url,
@@ -109,7 +123,7 @@ class GitHubClient:
 
         log.info(
             "github_http_ok",
-            rid=get_request_id(),
+            rid=ensure_request_id(),
             action=action,
             method=method,
             url=url,
@@ -125,7 +139,8 @@ class GitHubClient:
     async def resolve_ref_to_sha(self, owner: str, repo: str, ref: str) -> str:
         """
         Resolve a branch name like 'main' to a commit SHA using Git refs.
-        If ref already looks like a SHA, return it as-is.
+        IMPORTANT: We do NOT cache this, to avoid cross-test pollution and because
+        refs can move.
         """
         ref = ref.strip()
         if self._looks_like_sha(ref):
@@ -172,10 +187,9 @@ class GitHubClient:
 
         sha = j.get("object", {}).get("sha")
         if not sha:
-            # Not an HTTP failure, but still a useful warning.
             log.warning(
                 "github_unexpected_response",
-                rid=get_request_id(),
+                rid=ensure_request_id(),
                 action="resolve_ref_to_sha",
                 owner=owner,
                 repo=repo,
@@ -186,14 +200,13 @@ class GitHubClient:
         return sha
 
     async def repo_tree(self, owner: str, repo: str, ref: str) -> Dict[str, Any]:
-        """
-        Return recursive git tree for the repo at a given ref (branch name or commit SHA).
-        Uses:
-          - /git/refs/heads/{ref} to resolve branch -> sha
-          - /git/trees/{sha}?recursive=1 to fetch tree
-        """
         sha = await self.resolve_ref_to_sha(owner=owner, repo=repo, ref=ref)
 
+        cache_key = make_key("github", "repo_tree", owner, repo, ref, sha, "recursive=1")
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            self._cache_log("github_cache_hit", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref)
+            return cached
         url = f"{self.cfg.api_base}/repos/{owner}/{repo}/git/trees/{sha}"
 
         start = time.perf_counter()
@@ -233,18 +246,19 @@ class GitHubClient:
                 extra={"sha": sha},
             )
 
-            return r.json()
+            data = r.json()
+
+        # cache only successful responses
+        self._cache_set(cache_key, data)
+        return data
 
     async def read_file(self, owner: str, repo: str, path: str, ref: str) -> Dict[str, Any]:
-        """
-        Read a file via GitHub Contents API.
-
-        Endpoint:
-          GET /repos/{owner}/{repo}/contents/{path}?ref={ref}
-
-        Returns JSON object (may be 'file' or 'dir').
-        """
         path = path.lstrip("/")
+        cache_key = make_key("github", "read_file", owner, repo, ref, path)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
         url = f"{self.cfg.api_base}/repos/{owner}/{repo}/contents/{path}"
 
         start = time.perf_counter()
@@ -284,4 +298,9 @@ class GitHubClient:
                 path=path,
             )
 
-            return r.json()
+            data = r.json()
+            self._cache_log("github_cache_set", action="read_file", key=cache_key, owner=owner, repo=repo, ref=ref, path=path)
+
+
+        self._cache_set(cache_key, data)
+        return data
