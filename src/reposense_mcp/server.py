@@ -1,5 +1,6 @@
 from __future__ import annotations
-
+from reposense_mcp.mcp.response import ok, err
+from reposense_mcp.errors import RepoSenseError
 import base64
 from typing import Any, Dict, Optional
 
@@ -57,43 +58,65 @@ def github_auth_logout() -> Dict[str, Any]:
 
 @mcp.tool
 async def github_repo_tree(owner: str, repo: str, ref: str = "main", max_items: int = 5000) -> dict:
-    gh = GitHubClient()
-    data = await gh.repo_tree(owner=owner, repo=repo, ref=ref)
+    try:
+        gh = GitHubClient()
+        data = await gh.repo_tree(owner=owner, repo=repo, ref=ref)
 
-    full_tree = data.get("tree", []) or []
-    tree = full_tree[: max_items if max_items and max_items > 0 else len(full_tree)]
+        full_tree = data.get("tree", []) or []
+        tree = full_tree[: max_items if max_items and max_items > 0 else len(full_tree)]
 
-    return {
-        "sha": data.get("sha"),
-        "tree": tree,
-        "truncated": len(full_tree) > len(tree),
-        "max_items": max_items,
-        "ref": ref,
-    }
-
+        return ok(
+            {
+                "sha": data.get("sha"),
+                "tree": tree,
+                "truncated": len(full_tree) > len(tree),
+                "max_items": max_items,
+                "ref": ref,
+            }
+        )
+    except Exception as e:
+        return err(e)
 
 @mcp.tool
 async def github_read_file(owner: str, repo: str, path: str, ref: str = "main") -> dict:
-    policy = RepoPolicy()
-    if policy.is_denied(path):
-        return {"error": "denied", "reason": f"Access denied by policy for path: {path}"}
+    try:
+        policy = RepoPolicy()
+        if policy.is_denied(path):
+            raise RepoSenseError(
+                code="access_denied",
+                message="Access denied by policy.",
+                hint="Requested path matched denylist.",
+                details={"path": path},
+            )
 
-    gh = GitHubClient()
-    item = await gh.read_file(owner=owner, repo=repo, path=path, ref=ref)
+        gh = GitHubClient()
+        item = await gh.read_file(owner=owner, repo=repo, path=path, ref=ref)
 
-    if item.get("type") != "file":
-        return {"error": "not_a_file", "type": item.get("type"), "path": path}
+        if item.get("type") != "file":
+            raise RepoSenseError(
+                code="not_a_file",
+                message="Path is not a file.",
+                hint="Use github_repo_tree to inspect paths first.",
+                details={"path": path, "type": item.get("type")},
+            )
 
-    size = int(item.get("size", 0))
-    if size > policy.max_file_bytes:
-        return {"error": "too_large", "size": size, "max_bytes": policy.max_file_bytes, "path": path}
+        size = int(item.get("size", 0))
+        if size > policy.max_file_bytes:
+            raise RepoSenseError(
+                code="too_large",
+                message="File exceeds max size limit.",
+                hint="Increase policy max_file_bytes or request an excerpt tool (recommended).",
+                details={"path": path, "size": size, "max_bytes": policy.max_file_bytes},
+            )
 
-    content_b64 = item.get("content", "") or ""
-    content_bytes = base64.b64decode(content_b64.encode("utf-8"), validate=False)
-    text = content_bytes.decode("utf-8", errors="replace")
+        content_b64 = item.get("content", "") or ""
+        content_bytes = base64.b64decode(content_b64.encode("utf-8"), validate=False)
+        text = content_bytes.decode("utf-8", errors="replace")
 
-    return {"path": path, "ref": ref, "size": size, "text": text}
-
+        return ok({"path": path, "ref": ref, "size": size, "text": text})
+    except Exception as e:
+        return err(e)
+    
 @mcp.tool
 async def github_repo_snapshot(
     owner: str,

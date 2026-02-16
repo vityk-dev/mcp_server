@@ -32,5 +32,7 @@ async def test_repo_tree_branch_ref_resolves_to_sha(mcp_client, monkeypatch, tmp
     )
 
     r = await mcp_client.call_tool("github_repo_tree", {"owner": "vityk-dev", "repo": "3DPrintingPortfolio", "ref": "main"})
-    assert r.data["sha"] == "abc123"
-    assert r.data["tree"][0]["path"] == "README.md"
+    assert r.data["ok"] is True
+    assert r.data["data"]["sha"] == "abc123"
+    assert r.data["data"]["tree"][0]["path"] == "README.md"
+ 
