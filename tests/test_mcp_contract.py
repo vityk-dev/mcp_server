@@ -18,5 +18,6 @@ async def test_list_tools(mcp_client: Client):
 async def test_ping(mcp_client: Client):
     result = await mcp_client.call_tool(name="ping", arguments={"message": "hi"})
     assert result.data is not None
-    assert result.data["pong"] is True
-    assert result.data["message"] == "hi"
+    assert result.data["ok"] is True
+    assert result.data["data"]["pong"] is True
+    assert result.data["data"]["message"] == "hi"

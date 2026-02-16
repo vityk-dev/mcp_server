@@ -66,7 +66,8 @@ async def test_repo_snapshot_selects_and_reads(mcp_client, monkeypatch, tmp_path
         {"owner": "acme", "repo": "demo", "ref": "main", "max_files": 10},
     )
 
-    assert r.data["sha"] == "abc123"
-    assert r.data["stack"]["python"] is True
-    assert any(f["path"] == "pyproject.toml" for f in r.data["files"])
-    assert any(f["path"] == "readme.md" for f in r.data["files"])
+    assert r.data["ok"] is True
+    assert r.data["data"]["sha"] == "abc123"
+    assert r.data["data"]["stack"]["python"] is True
+    assert any(f["path"] == "pyproject.toml" for f in r.data["data"]["files"])
+    assert any(f["path"] == "readme.md" for f in r.data["data"]["files"])

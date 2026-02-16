@@ -1,8 +1,10 @@
+# src/reposense_mcp/server.py
 from __future__ import annotations
 from reposense_mcp.mcp.response import ok, err
 from reposense_mcp.errors import RepoSenseError
 import base64
 from typing import Any, Dict, Optional
+
 
 from fastmcp import FastMCP
 
@@ -16,42 +18,59 @@ mcp = FastMCP("RepoSense MCP")
 
 @mcp.tool
 def ping(message: Optional[str] = None) -> Dict[str, Any]:
-    return {"pong": True, "message": message}
+    try:
+        return ok({"pong": True, "message": message})
+    except Exception as e:
+        return err(e)
 
 
 # ---------------- Auth ----------------
 
 @mcp.tool
 async def github_auth_start() -> Dict[str, Any]:
-    auth = GitHubDeviceAuth(load_github_oauth_config())
-    dc = await auth.start()
-    return {
-        "verification_uri": dc.verification_uri,
-        "user_code": dc.user_code,
-        "device_code": dc.device_code,
-        "expires_in": dc.expires_in,
-        "interval": dc.interval,
-        "instructions": "Open verification_uri in a browser and enter user_code.",
-    }
+    try:
+        auth = GitHubDeviceAuth(load_github_oauth_config())
+        dc = await auth.start()
+        return ok(
+            {
+                "verification_uri": dc.verification_uri,
+                "user_code": dc.user_code,
+                "device_code": dc.device_code,
+                "expires_in": dc.expires_in,
+                "interval": dc.interval,
+                "instructions": "Open verification_uri in a browser and enter user_code.",
+            }
+        )
+    except Exception as e:
+        return err(e)
 
 
 @mcp.tool
 async def github_auth_poll(device_code: str) -> Dict[str, Any]:
-    auth = GitHubDeviceAuth(load_github_oauth_config())
-    status, payload = await auth.poll_once(device_code=device_code)
-    return {"status": status, **payload}
+    try:
+        auth = GitHubDeviceAuth(load_github_oauth_config())
+        status, payload = await auth.poll_once(device_code=device_code)
+        return ok({"status": status, **payload})
+    except Exception as e:
+        return err(e)
 
 
 @mcp.tool
 def github_auth_status() -> Dict[str, Any]:
-    auth = GitHubDeviceAuth(load_github_oauth_config())
-    return auth.status()
+    try:
+        auth = GitHubDeviceAuth(load_github_oauth_config())
+        return ok(auth.status())
+    except Exception as e:
+        return err(e)
 
 
 @mcp.tool
 def github_auth_logout() -> Dict[str, Any]:
-    auth = GitHubDeviceAuth(load_github_oauth_config())
-    return auth.logout()
+    try:
+        auth = GitHubDeviceAuth(load_github_oauth_config())
+        return ok(auth.logout())
+    except Exception as e:
+        return err(e)
 
 
 # ---------------- Repo read-only tools ----------------
@@ -76,6 +95,7 @@ async def github_repo_tree(owner: str, repo: str, ref: str = "main", max_items: 
         )
     except Exception as e:
         return err(e)
+
 
 @mcp.tool
 async def github_read_file(owner: str, repo: str, path: str, ref: str = "main") -> dict:
@@ -117,6 +137,7 @@ async def github_read_file(owner: str, repo: str, path: str, ref: str = "main") 
     except Exception as e:
         return err(e)
     
+
 @mcp.tool
 async def github_repo_snapshot(
     owner: str,
@@ -132,149 +153,155 @@ async def github_repo_snapshot(
     - Reads up to `max_files` files, respecting RepoPolicy denylist + max bytes
     - Returns structured data suitable for planning code changes
     """
-    policy = RepoPolicy()
-    gh = GitHubClient()
+    try:
+        from collections import Counter
 
-    tree_data = await gh.repo_tree(owner=owner, repo=repo, ref=ref)
-    tree = tree_data.get("tree", []) or []
+        policy = RepoPolicy()
+        gh = GitHubClient()
 
-    # Only blobs (files)
-    blobs = [t for t in tree if t.get("type") == "blob" and t.get("path")]
-    paths = [t["path"] for t in blobs]
-    from collections import Counter
-    exts = Counter()
-    top_dirs = Counter()
+        tree_data = await gh.repo_tree(owner=owner, repo=repo, ref=ref)
+        tree = tree_data.get("tree", []) or []
 
-    for p in paths:
-        # extension stats
-        if "." in p.rsplit("/", 1)[-1]:
-            exts[p.rsplit(".", 1)[-1].lower()] += 1
-        else:
-            exts["(no_ext)"] += 1
+        # Only blobs (files)
+        blobs = [t for t in tree if t.get("type") == "blob" and t.get("path")]
+        paths = [t["path"] for t in blobs]
 
-        # top dir stats
-        top = p.split("/", 1)[0] if "/" in p else "(root)"
-        top_dirs[top] += 1
+        exts = Counter()
+        top_dirs = Counter()
 
-    # ---- Heuristics: rank important files ----
-    priority_exact = [
-        "README.md", "readme.md",
-        "pyproject.toml", "requirements.txt", "requirements-dev.txt",
-        "setup.py", "setup.cfg", "Pipfile", "poetry.lock", "uv.lock",
-        "CMakeLists.txt", "Makefile", "Dockerfile",
-        "package.json", "pnpm-lock.yaml", "yarn.lock", "tsconfig.json",
-        ".gitignore",
-    ]
+        for p in paths:
+            # extension stats
+            if "." in p.rsplit("/", 1)[-1]:
+                exts[p.rsplit(".", 1)[-1].lower()] += 1
+            else:
+                exts["(no_ext)"] += 1
 
-    priority_prefix = [
-        ".github/workflows/",
-        "docs/",
-        "src/",
-        "include/",
-    ]
+            # top dir stats
+            top = p.split("/", 1)[0] if "/" in p else "(root)"
+            top_dirs[top] += 1
 
-    priority_suffix = [
-        ".py", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp", ".md",
-    ]
+        # ---- Heuristics: rank important files ----
+        priority_exact = [
+            "README.md", "readme.md",
+            "pyproject.toml", "requirements.txt", "requirements-dev.txt",
+            "setup.py", "setup.cfg", "Pipfile", "poetry.lock", "uv.lock",
+            "CMakeLists.txt", "Makefile", "Dockerfile",
+            "package.json", "pnpm-lock.yaml", "yarn.lock", "tsconfig.json",
+            ".gitignore",
+        ]
 
-    def score(p: str) -> int:
-        s = 0
-        if p in priority_exact:
-            s += 10_000
-        for pref in priority_prefix:
-            if p.startswith(pref):
-                s += 500
-        for suf in priority_suffix:
-            if p.endswith(suf):
-                s += 50
-        # Favor top-level files
-        if "/" not in p:
-            s += 300
-        # Favor likely entrypoints
-        low = p.lower()
-        if low in ("main.py", "app.py", "server.py", "__main__.py"):
-            s += 2000
-        if low.endswith("main.cpp"):
-            s += 2000
-        return s
+        priority_prefix = [
+            ".github/workflows/",
+            "docs/",
+            "src/",
+            "include/",
+        ]
 
-    ranked = sorted(paths, key=score, reverse=True)
+        priority_suffix = [
+            ".py", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp", ".md",
+        ]
 
-    # Filter denylist + keep only unique, best candidates
-    selected: list[str] = []
-    for p in ranked:
-        if policy.is_denied(p):
-            continue
-        selected.append(p)
-        if len(selected) >= max_files:
-            break
+        def score(p: str) -> int:
+            s = 0
+            if p in priority_exact:
+                s += 10_000
+            for pref in priority_prefix:
+                if p.startswith(pref):
+                    s += 500
+            for suf in priority_suffix:
+                if p.endswith(suf):
+                    s += 50
+            # Favor top-level files
+            if "/" not in p:
+                s += 300
+            # Favor likely entrypoints
+            low = p.lower()
+            if low in ("main.py", "app.py", "server.py", "__main__.py"):
+                s += 2000
+            if low.endswith("main.cpp"):
+                s += 2000
+            return s
 
-    # ---- Read selected files ----
-    import base64
+        ranked = sorted(paths, key=score, reverse=True)
 
-    files_out = []
-    skipped = []
-    for p in selected:
-        try:
-            item = await gh.read_file(owner=owner, repo=repo, path=p, ref=ref)
-        except Exception as e:
-            skipped.append({"path": p, "reason": f"read_failed: {e}"})
-            continue
+        # Filter denylist + keep only unique, best candidates
+        selected: list[str] = []
+        for p in ranked:
+            if policy.is_denied(p):
+                continue
+            selected.append(p)
+            if len(selected) >= max_files:
+                break
 
-        if item.get("type") != "file":
-            skipped.append({"path": p, "reason": f"not_a_file: {item.get('type')}"})
-            continue
+        files_out = []
+        skipped = []
+        for p in selected:
+            try:
+                item = await gh.read_file(owner=owner, repo=repo, path=p, ref=ref)
+            except Exception as e:
+                skipped.append({"path": p, "reason": f"read_failed: {e}"})
+                continue
 
-        size = int(item.get("size", 0))
-        if size > policy.max_file_bytes:
-            skipped.append({"path": p, "reason": "too_large", "size": size})
-            continue
+            if item.get("type") != "file":
+                skipped.append({"path": p, "reason": f"not_a_file: {item.get('type')}"})
+                continue
 
-        content_b64 = item.get("content", "") or ""
-        raw = base64.b64decode(content_b64.encode("utf-8"), validate=False)
-        text = raw.decode("utf-8", errors="replace")
+            size = int(item.get("size", 0))
+            if size > policy.max_file_bytes:
+                skipped.append({"path": p, "reason": "too_large", "size": size})
+                continue
 
-        if max_chars_per_file and len(text) > max_chars_per_file:
-            text = text[:max_chars_per_file] + "\n\n[TRUNCATED]\n"
+            content_b64 = item.get("content", "") or ""
+            raw = base64.b64decode(content_b64.encode("utf-8"), validate=False)
+            text = raw.decode("utf-8", errors="replace")
 
-        files_out.append({"path": p, "size": size, "text": text})
+            if max_chars_per_file and len(text) > max_chars_per_file:
+                text = text[:max_chars_per_file] + "\n\n[TRUNCATED]\n"
 
-    # ---- Stack detection ----
-    pathset = set(paths)
-    stack = {
-        "python": any(p in pathset for p in ("pyproject.toml", "requirements.txt", "setup.py", "setup.cfg")) or any(p.endswith(".py") for p in paths),
-        "cpp": any(p.endswith((".cpp", ".cc", ".cxx", ".hpp", ".h")) for p in paths) or "CMakeLists.txt" in pathset,
-        "node": "package.json" in pathset,
-    }
+            files_out.append({"path": p, "size": size, "text": text})
 
-    # ---- Entrypoints (best guesses) ----
-    entrypoints = []
-    candidates = [
-        "main.py", "app.py", "server.py", "src/main.py", "src/app.py", "src/server.py",
-        "__main__.py", "src/__main__.py",
-        "main.cpp", "src/main.cpp",
-        "CMakeLists.txt", "pyproject.toml", "package.json",
-    ]
-    for c in candidates:
-        if c in pathset:
-            entrypoints.append(c)
+        # ---- Stack detection ----
+        pathset = set(paths)
+        stack = {
+            "python": any(p in pathset for p in ("pyproject.toml", "requirements.txt", "setup.py", "setup.cfg")) or any(p.endswith(".py") for p in paths),
+            "cpp": any(p.endswith((".cpp", ".cc", ".cxx", ".hpp", ".h")) for p in paths) or "CMakeLists.txt" in pathset,
+            "node": "package.json" in pathset,
+        }
 
-    return {
-        "stats": {
-        "total_items": len(tree),
-        "total_files": len(paths),
-        "top_dirs": top_dirs.most_common(20),
-        "extensions": exts.most_common(30),
-        },
-        "owner": owner,
-        "repo": repo,
-        "ref": ref,
-        "sha": tree_data.get("sha"),
-        "stats": {"total_items": len(tree), "total_files": len(paths)},
-        "stack": stack,
-        "entrypoints": entrypoints,
-        "selected_paths": selected,
-        "files": files_out,
-        "skipped": skipped,
-        "policy": {"max_file_bytes": policy.max_file_bytes, "deny_patterns": list(policy.deny_patterns)},
-    }
+        # ---- Entrypoints (best guesses) ----
+        entrypoints = []
+        candidates = [
+            "main.py", "app.py", "server.py", "src/main.py", "src/app.py", "src/server.py",
+            "__main__.py", "src/__main__.py",
+            "main.cpp", "src/main.cpp",
+            "CMakeLists.txt", "pyproject.toml", "package.json",
+        ]
+        for c in candidates:
+            if c in pathset:
+                entrypoints.append(c)
+
+        return ok(
+            {
+                "owner": owner,
+                "repo": repo,
+                "ref": ref,
+                "sha": tree_data.get("sha"),
+                "stats": {
+                    "total_items": len(tree),
+                    "total_files": len(paths),
+                    "top_dirs": top_dirs.most_common(20),
+                    "extensions": exts.most_common(30),
+                },
+                "stack": stack,
+                "entrypoints": entrypoints,
+                "selected_paths": selected,
+                "files": files_out,
+                "skipped": skipped,
+                "policy": {
+                    "max_file_bytes": policy.max_file_bytes,
+                    "deny_patterns": list(policy.deny_patterns),
+                },
+            }
+        )
+    except Exception as e:
+        return err(e)  

@@ -2,6 +2,9 @@ README.md
 pyproject.toml
 src/reposense_mcp/__init__.py
 src/reposense_mcp/app.py
+src/reposense_mcp/config.py
+src/reposense_mcp/errors.py
+src/reposense_mcp/logging_config.py
 src/reposense_mcp/server.py
 src/reposense_mcp.egg-info/PKG-INFO
 src/reposense_mcp.egg-info/SOURCES.txt
@@ -10,12 +13,16 @@ src/reposense_mcp.egg-info/requires.txt
 src/reposense_mcp.egg-info/top_level.txt
 src/reposense_mcp/github/__init__.py
 src/reposense_mcp/github/auth_device.py
+src/reposense_mcp/github/client.py
 src/reposense_mcp/github/config.py
-src/reposense_mcp/github/test_github_device_flow.py
 src/reposense_mcp/github/token_store.py
 src/reposense_mcp/mcp/__init__.py
 src/reposense_mcp/mcp/handlers.py
 src/reposense_mcp/mcp/protocol.py
+src/reposense_mcp/mcp/response.py
 src/reposense_mcp/security/__init__.py
+src/reposense_mcp/security/policy.py
+tests/test_github_repo_tools.py
 tests/test_health.py
 tests/test_mcp_contract.py
+tests/test_repo_snapshot.py

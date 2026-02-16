@@ -36,9 +36,11 @@ async def test_github_auth_start(mcp_client, monkeypatch):
     req = route.calls[0].request
     assert "client_id=client_id_123" in str(req.url)
 
-    assert r.data["verification_uri"].startswith("https://")
-    assert r.data["user_code"] == "USER-CODE"
-    assert r.data["device_code"] == "dev123"
+    assert r.data["ok"] is True
+    d = r.data["data"]
+    assert d["verification_uri"].startswith("https://")
+    assert d["user_code"] == "USER-CODE"
+    assert d["device_code"] == "dev123"
 
 
 @respx.mock
@@ -60,14 +62,19 @@ async def test_github_auth_poll_pending_then_authorized(mcp_client, monkeypatch,
     )
 
     r1 = await mcp_client.call_tool("github_auth_poll", {"device_code": "dev123"})
-    assert r1.data["status"] == "pending"
+    assert r1.data["ok"] is True
+    assert r1.data["data"]["status"] == "pending"
+
+
 
     r2 = await mcp_client.call_tool("github_auth_poll", {"device_code": "dev123"})
-    assert r2.data["status"] == "authorized"
-    assert r2.data["token_saved"] is True
+    assert r2.data["ok"] is True
+    assert r2.data["data"]["status"] == "authorized"
+    assert r2.data["data"]["token_saved"] is True
 
     st = await mcp_client.call_tool("github_auth_status", {})
-    assert st.data["authorized"] is True
-    assert st.data["token"]["access_token"] == "tok_abc"
+    assert st.data["ok"] is True
+    assert st.data["data"]["authorized"] is True
+    assert st.data["data"]["token"]["access_token"] == "tok_abc"
     
     

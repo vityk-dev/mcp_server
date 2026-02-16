@@ -1,12 +1,14 @@
+# src/reposense_mcp/github/client.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import httpx
-
+from reposense_mcp.logging_config import get_logger
 from reposense_mcp.github.token_store import TokenStore
 
+log = get_logger("reposense_mcp.github")
 
 @dataclass(frozen=True)
 class GitHubClientConfig:
