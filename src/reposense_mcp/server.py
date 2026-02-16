@@ -89,8 +89,9 @@ def ping(message: Optional[str] = None) -> Dict[str, Any]:
 def github_cache_stats() -> Dict[str, Any]:
     start = time.perf_counter()
     try:
-        ttl = float(getattr(settings, "cache_ttl_seconds", 30.0))
-        cache = default_cache(ttl_seconds=ttl)
+        ttl = float(getattr(settings, "cache_ttl_seconds", 300.0))
+        max_items = int(getattr(settings, "cache_max_items", 2048))
+        cache = default_cache(ttl_seconds=ttl, max_items=max_items)
         out = ok(cache.stats())
     except Exception as e:
         out = err(e)
@@ -103,8 +104,9 @@ def github_cache_stats() -> Dict[str, Any]:
 def github_cache_clear() -> Dict[str, Any]:
     start = time.perf_counter()
     try:
-        ttl = float(getattr(settings, "cache_ttl_seconds", 30.0))
-        cache = default_cache(ttl_seconds=ttl)
+        ttl = float(getattr(settings, "cache_ttl_seconds", 300.0))
+        max_items = int(getattr(settings, "cache_max_items", 2048))
+        cache = default_cache(ttl_seconds=ttl, max_items=max_items)
         cache.clear()
         out = ok({"cleared": True})
     except Exception as e:
@@ -409,8 +411,9 @@ def github_auth_logout() -> Dict[str, Any]:
         auth = GitHubDeviceAuth(load_github_oauth_config())
         logout_result = auth.logout()
 
-        ttl = float(getattr(settings, "cache_ttl_seconds", 30.0))
-        cache = default_cache(ttl_seconds=ttl)
+        ttl = float(getattr(settings, "cache_ttl_seconds", 300.0))
+        max_items = int(getattr(settings, "cache_max_items", 2048))
+        cache = default_cache(ttl_seconds=ttl, max_items=max_items)
         cache.clear()
 
         out = ok({**logout_result, "cache_cleared": True})

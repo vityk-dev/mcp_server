@@ -30,7 +30,8 @@ class GitHubClient:
         self._cache = None
         if getattr(settings, "cache_enabled", True):
             ttl = float(getattr(settings, "cache_ttl_seconds", 300.0))
-            self._cache = default_cache(ttl_seconds=ttl)
+            max_items = int(getattr(settings, "cache_max_items", 2048))
+            self._cache = default_cache(ttl_seconds=ttl, max_items=max_items)
 
     def _token(self) -> str:
         token = self.store.load()
@@ -59,11 +60,18 @@ class GitHubClient:
             return None
         return self._cache.get(key)
 
-    def _cache_set(self, key: str, value: Any) -> None:
+    def _cache_set(self, key: str, value: Any, *, ttl_seconds: float | None = None) -> None:
         if not self._cache:
             return
-        self._cache.set(key, value)
+        # TTLCache supports per-entry ttl override via ttl_seconds
+        self._cache.set(key, value, ttl_seconds=ttl_seconds)
     
+    def _ttl_for_ref(self, ref: str) -> float:
+        """Use a shorter TTL for moving refs (branches/tags) and longer for immutable SHAs."""
+        if self._looks_like_sha(ref):
+            return float(getattr(settings, "cache_ttl_seconds", 300.0))
+        return float(getattr(settings, "cache_branch_ttl_seconds", 30.0))
+
     def _cache_log(self, event: str, **fields: Any) -> None:
         if not getattr(settings, "cache_log_events", False):
             return
@@ -205,8 +213,10 @@ class GitHubClient:
         cache_key = make_key("github", "repo_tree", owner, repo, ref, sha, "recursive=1")
         cached = self._cache_get(cache_key)
         if cached is not None:
-            self._cache_log("github_cache_hit", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref)
+            self._cache_log("github_cache_hit", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref, sha=sha)
             return cached
+
+        self._cache_log("github_cache_miss", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref, sha=sha)
         url = f"{self.cfg.api_base}/repos/{owner}/{repo}/git/trees/{sha}"
 
         start = time.perf_counter()
@@ -249,7 +259,18 @@ class GitHubClient:
             data = r.json()
 
         # cache only successful responses
-        self._cache_set(cache_key, data)
+        ttl_used = self._ttl_for_ref(ref)
+        self._cache_set(cache_key, data, ttl_seconds=ttl_used)
+        self._cache_log(
+            "github_cache_set",
+            action="repo_tree",
+            key=cache_key,
+            owner=owner,
+            repo=repo,
+            ref=ref,
+            sha=sha,
+            ttl_seconds=ttl_used,
+        )
         return data
 
     async def read_file(self, owner: str, repo: str, path: str, ref: str) -> Dict[str, Any]:
@@ -257,7 +278,26 @@ class GitHubClient:
         cache_key = make_key("github", "read_file", owner, repo, ref, path)
         cached = self._cache_get(cache_key)
         if cached is not None:
+            self._cache_log(
+                "github_cache_hit",
+                action="read_file",
+                key=cache_key,
+                owner=owner,
+                repo=repo,
+                ref=ref,
+                path=path,
+            )
             return cached
+
+        self._cache_log(
+            "github_cache_miss",
+            action="read_file",
+            key=cache_key,
+            owner=owner,
+            repo=repo,
+            ref=ref,
+            path=path,
+        )
 
         url = f"{self.cfg.api_base}/repos/{owner}/{repo}/contents/{path}"
 
@@ -299,8 +339,18 @@ class GitHubClient:
             )
 
             data = r.json()
-            self._cache_log("github_cache_set", action="read_file", key=cache_key, owner=owner, repo=repo, ref=ref, path=path)
 
 
-        self._cache_set(cache_key, data)
+        ttl_used = self._ttl_for_ref(ref)
+        self._cache_set(cache_key, data, ttl_seconds=ttl_used)
+        self._cache_log(
+            "github_cache_set",
+            action="read_file",
+            key=cache_key,
+            owner=owner,
+            repo=repo,
+            ref=ref,
+            path=path,
+            ttl_seconds=ttl_used,
+        )
         return data
