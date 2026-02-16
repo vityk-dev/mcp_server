@@ -5,6 +5,7 @@ import time
 from reposense_mcp.mcp.context import set_request_id
 from reposense_mcp.server import mcp
 
+
 configure_logging()
 log = get_logger("reposense_mcp.app")
 # Create MCP ASGI app with path="/" since we mount at /mcp
