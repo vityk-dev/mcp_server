@@ -1,3 +1,4 @@
+# tests/test_mcp_contract.py
 import pytest
 from fastmcp.client import Client
 

@@ -20,6 +20,7 @@ log = get_logger("reposense_mcp.tools")
 
 mcp = FastMCP("RepoSense MCP")
 
+
 def _log_tool(tool: str, start: float, result: dict, **fields: Any) -> None:
     rid = get_request_id()
     elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -33,6 +34,7 @@ def _log_tool(tool: str, start: float, result: dict, **fields: Any) -> None:
         code = (result.get("error") or {}).get("code")
         log.warning("tool_call", **payload, error_code=code)
 
+
 @mcp.tool
 def ping(message: Optional[str] = None) -> Dict[str, Any]:
     start = time.perf_counter()
@@ -43,6 +45,7 @@ def ping(message: Optional[str] = None) -> Dict[str, Any]:
 
     _log_tool("ping", start, out)
     return out
+
 
 @mcp.tool
 async def github_auth_start() -> Dict[str, Any]:
@@ -66,6 +69,7 @@ async def github_auth_start() -> Dict[str, Any]:
     _log_tool("github_auth_start", start, out)
     return out
 
+
 @mcp.tool
 async def github_auth_poll(device_code: str) -> Dict[str, Any]:
     start = time.perf_counter()
@@ -79,6 +83,7 @@ async def github_auth_poll(device_code: str) -> Dict[str, Any]:
     _log_tool("github_auth_poll", start, out)
     return out
 
+
 @mcp.tool
 def github_auth_status() -> Dict[str, Any]:
     start = time.perf_counter()
@@ -91,6 +96,7 @@ def github_auth_status() -> Dict[str, Any]:
     _log_tool("github_auth_status", start, out)
     return out
 
+
 @mcp.tool
 def github_auth_logout() -> Dict[str, Any]:
     start = time.perf_counter()
@@ -102,6 +108,7 @@ def github_auth_logout() -> Dict[str, Any]:
 
     _log_tool("github_auth_logout", start, out)
     return out
+
 
 @mcp.tool
 async def github_repo_tree(owner: str, repo: str, ref: str = "main", max_items: int = 5000) -> dict:
@@ -127,6 +134,7 @@ async def github_repo_tree(owner: str, repo: str, ref: str = "main", max_items: 
 
     _log_tool("github_repo_tree", start, out, owner=owner, repo=repo, ref=ref)
     return out
+
 
 @mcp.tool
 async def github_read_file(owner: str, repo: str, path: str, ref: str = "main") -> dict:
@@ -171,6 +179,163 @@ async def github_read_file(owner: str, repo: str, path: str, ref: str = "main") 
 
     _log_tool("github_read_file", start, out, owner=owner, repo=repo, ref=ref, path=path)
     return out
+
+
+@mcp.tool
+async def github_read_excerpt(
+    owner: str,
+    repo: str,
+    path: str,
+    ref: str = "main",
+    head_lines: int | None = None,
+    tail_lines: int | None = None,
+    start_line: int | None = None,
+    end_line: int | None = None,
+) -> dict:
+    """
+    Token-efficient file reader.
+
+    Exactly one mode:
+      - head_lines=N
+      - tail_lines=N
+      - start_line + end_line (1-based, inclusive)
+
+    Returns excerpt + metadata, enforcing RepoPolicy denylist + max_file_bytes.
+    """
+    start = time.perf_counter()
+    try:
+        # --- validate mode ---
+        modes = 0
+        if head_lines is not None:
+            modes += 1
+        if tail_lines is not None:
+            modes += 1
+        if start_line is not None or end_line is not None:
+            modes += 1
+
+        if modes != 1:
+            raise RepoSenseError(
+                code="bad_request",
+                message="Invalid excerpt parameters.",
+                hint="Specify exactly one: head_lines, tail_lines, or (start_line + end_line).",
+                details={
+                    "head_lines": head_lines,
+                    "tail_lines": tail_lines,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                },
+            )
+
+        if head_lines is not None and head_lines <= 0:
+            raise RepoSenseError(
+                code="bad_request",
+                message="head_lines must be > 0.",
+                hint="Example: head_lines=50",
+                details={"head_lines": head_lines},
+            )
+
+        if tail_lines is not None and tail_lines <= 0:
+            raise RepoSenseError(
+                code="bad_request",
+                message="tail_lines must be > 0.",
+                hint="Example: tail_lines=50",
+                details={"tail_lines": tail_lines},
+            )
+
+        if (start_line is not None) or (end_line is not None):
+            if start_line is None or end_line is None:
+                raise RepoSenseError(
+                    code="bad_request",
+                    message="Both start_line and end_line are required for range mode.",
+                    hint="Example: start_line=10, end_line=80",
+                    details={"start_line": start_line, "end_line": end_line},
+                )
+            if start_line <= 0 or end_line <= 0 or end_line < start_line:
+                raise RepoSenseError(
+                    code="bad_request",
+                    message="Invalid line range.",
+                    hint="Use 1-based line numbers with end_line >= start_line.",
+                    details={"start_line": start_line, "end_line": end_line},
+                )
+
+        # --- policy ---
+        policy = RepoPolicy()
+        if policy.is_denied(path):
+            raise RepoSenseError(
+                code="access_denied",
+                message="Access denied by policy.",
+                hint="Requested path matched denylist.",
+                details={"path": path},
+            )
+
+        # --- read file (contents api) ---
+        gh = GitHubClient()
+        item = await gh.read_file(owner=owner, repo=repo, path=path, ref=ref)
+
+        if item.get("type") != "file":
+            raise RepoSenseError(
+                code="not_a_file",
+                message="Path is not a file.",
+                hint="Use github_repo_tree to inspect paths first.",
+                details={"path": path, "type": item.get("type")},
+            )
+
+        size_bytes = int(item.get("size", 0))
+        if size_bytes > policy.max_file_bytes:
+            raise RepoSenseError(
+                code="too_large",
+                message="File exceeds max size limit.",
+                hint="Request a smaller file or increase policy max_file_bytes (not recommended).",
+                details={"path": path, "size": size_bytes, "max_bytes": policy.max_file_bytes},
+            )
+
+        content_b64 = item.get("content", "") or ""
+        content_bytes = base64.b64decode(content_b64.encode("utf-8"), validate=False)
+        text_full = content_bytes.decode("utf-8", errors="replace")
+
+        # split lines preserving newline characters (better for diffs + excerpt fidelity)
+        lines = text_full.splitlines(keepends=True)
+        total_lines = len(lines)
+
+        # compute slice (0-based python slice)
+        if head_lines is not None:
+            s0 = 0
+            e0 = min(total_lines, head_lines)
+        elif tail_lines is not None:
+            e0 = total_lines
+            s0 = max(0, total_lines - tail_lines)
+        else:
+            # start_line/end_line are 1-based inclusive
+            s0 = min(total_lines, max(0, start_line - 1))
+            e0 = min(total_lines, end_line)
+
+        excerpt_lines = lines[s0:e0]
+        excerpt_text = "".join(excerpt_lines)
+
+        # 1-based inclusive result range (friendly for LLMs)
+        out_start = s0 + 1 if total_lines > 0 and e0 > s0 else 0
+        out_end = e0 if total_lines > 0 and e0 > s0 else 0
+
+        truncated = not (s0 == 0 and e0 == total_lines)
+
+        out = ok(
+            {
+                "path": path,
+                "ref": ref,
+                "size_bytes": size_bytes,
+                "total_lines": total_lines,
+                "start_line": out_start,
+                "end_line": out_end,
+                "truncated": truncated,
+                "text": excerpt_text,
+            }
+        )
+    except Exception as e:
+        out = err(e)
+
+    _log_tool("github_read_excerpt", start, out, owner=owner, repo=repo, ref=ref, path=path)
+    return out
+
 
 @mcp.tool
 async def github_repo_snapshot(
