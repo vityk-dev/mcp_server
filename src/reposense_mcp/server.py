@@ -1,32 +1,109 @@
 # src/reposense_mcp/server.py
 from __future__ import annotations
 
+import asyncio
 import base64
+import threading
 import time
 from typing import Any, Dict, Optional
 
 from fastmcp import FastMCP
 
+from reposense_mcp.cache import default_cache
+from reposense_mcp.config import settings
 from reposense_mcp.errors import RepoSenseError
 from reposense_mcp.github.auth_device import GitHubDeviceAuth
 from reposense_mcp.github.client import GitHubClient
 from reposense_mcp.github.config import load_github_oauth_config
+from reposense_mcp.logging_config import get_logger, new_request_id
+from reposense_mcp.mcp.context import get_request_id, set_request_id
 from reposense_mcp.mcp.response import err, ok
 from reposense_mcp.security.policy import RepoPolicy
-from reposense_mcp.logging_config import get_logger, new_request_id
-from reposense_mcp.mcp.context import get_request_id, set_request_id, ensure_request_id
-from reposense_mcp.cache import default_cache
-from reposense_mcp.config import settings
 
 log = get_logger("reposense_mcp.tools")
 
 mcp = FastMCP("RepoSense MCP")
 
-# in src/reposense_mcp/server.py
 
-from reposense_mcp.mcp.context import get_request_id, set_request_id
-from reposense_mcp.logging_config import new_request_id
+# -------------------------
+# Cache helpers
+# -------------------------
+def _cache_instance():
+    ttl = float(getattr(settings, "cache_ttl_seconds", 300.0))
+    max_items = int(getattr(settings, "cache_max_items", 2048))
+    return default_cache(ttl_seconds=ttl, max_items=max_items)
 
+
+# -------------------------
+# Process-wide GitHub clients
+# -------------------------
+_gh_lock = threading.Lock()
+_gh_cached: GitHubClient | None = None
+_gh_nocache: GitHubClient | None = None
+
+
+def _get_github_client(*, no_cache: bool = False) -> GitHubClient:
+    """Process-wide GitHub client(s).
+
+    Why:
+    - Reuse underlying httpx AsyncClient connection pool
+    - Avoid per-request client construction overhead
+
+    We keep two instances:
+    - cached: normal behavior
+    - nocache: identical but with cache disabled
+    """
+    global _gh_cached, _gh_nocache
+    with _gh_lock:
+        if _gh_cached is None:
+            _gh_cached = GitHubClient()
+
+        if _gh_nocache is None:
+            _gh_nocache = GitHubClient()
+            # Disable cache permanently for this instance.
+            try:
+                _gh_nocache._cache = None  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+        return _gh_nocache if no_cache else _gh_cached
+
+
+async def aclose_github_clients() -> None:
+    """Best-effort shutdown hook for the shared GitHub clients."""
+    global _gh_cached, _gh_nocache
+
+    with _gh_lock:
+        cached = _gh_cached
+        nocache = _gh_nocache
+        _gh_cached = None
+        _gh_nocache = None
+
+    for gh in (cached, nocache):
+        if gh is None:
+            continue
+        try:
+            await gh.aclose()
+        except Exception:
+            # Never fail shutdown
+            pass
+
+
+def _try_schedule_aclose() -> None:
+    """Best-effort: schedule aclose of clients if we're in an event loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    try:
+        loop.create_task(aclose_github_clients())
+    except Exception:
+        pass
+
+
+# -------------------------
+# Request id / logging
+# -------------------------
 def _resolve_request_id() -> str:
     """
     Resolve a request id for logging.
@@ -36,9 +113,9 @@ def _resolve_request_id() -> str:
       2) Otherwise: use existing contextvar if present
       3) Otherwise: generate + set
     """
-    # 1) Prefer HTTP header when present (this fixes the rid_mcp_2 test)
     try:
         from fastmcp.server.dependencies import get_http_headers  # type: ignore
+
         headers = get_http_headers() or {}
         headers_l = {str(k).lower(): v for k, v in headers.items()}
         rid = headers_l.get("x-request-id")
@@ -48,12 +125,10 @@ def _resolve_request_id() -> str:
     except Exception:
         pass
 
-    # 2) If already set in context, reuse it
     rid = get_request_id()
     if rid:
         return rid
 
-    # 3) Generate new
     rid = new_request_id()
     set_request_id(rid)
     return rid
@@ -61,12 +136,10 @@ def _resolve_request_id() -> str:
 
 def _log_tool(tool: str, start: float, result: dict, **fields: Any) -> None:
     rid = _resolve_request_id()
-
     elapsed_ms = int((time.perf_counter() - start) * 1000)
     okv = bool(result.get("ok"))
 
     payload = {"rid": rid, "tool": tool, "ok": okv, "elapsed_ms": elapsed_ms, **fields}
-
     if okv:
         log.info("tool_call", **payload)
     else:
@@ -74,6 +147,9 @@ def _log_tool(tool: str, start: float, result: dict, **fields: Any) -> None:
         log.warning("tool_call", **payload, error_code=code)
 
 
+# -------------------------
+# Tools
+# -------------------------
 @mcp.tool
 def ping(message: Optional[str] = None) -> Dict[str, Any]:
     start = time.perf_counter()
@@ -81,21 +157,18 @@ def ping(message: Optional[str] = None) -> Dict[str, Any]:
         out = ok({"pong": True, "message": message})
     except Exception as e:
         out = err(e)
-
     _log_tool("ping", start, out)
     return out
+
 
 @mcp.tool
 def github_cache_stats() -> Dict[str, Any]:
     start = time.perf_counter()
     try:
-        ttl = float(getattr(settings, "cache_ttl_seconds", 300.0))
-        max_items = int(getattr(settings, "cache_max_items", 2048))
-        cache = default_cache(ttl_seconds=ttl, max_items=max_items)
+        cache = _cache_instance()
         out = ok(cache.stats())
     except Exception as e:
         out = err(e)
-
     _log_tool("github_cache_stats", start, out)
     return out
 
@@ -104,16 +177,14 @@ def github_cache_stats() -> Dict[str, Any]:
 def github_cache_clear() -> Dict[str, Any]:
     start = time.perf_counter()
     try:
-        ttl = float(getattr(settings, "cache_ttl_seconds", 300.0))
-        max_items = int(getattr(settings, "cache_max_items", 2048))
-        cache = default_cache(ttl_seconds=ttl, max_items=max_items)
+        cache = _cache_instance()
         cache.clear()
         out = ok({"cleared": True})
     except Exception as e:
         out = err(e)
-
     _log_tool("github_cache_clear", start, out)
     return out
+
 
 @mcp.tool
 async def github_auth_start() -> Dict[str, Any]:
@@ -133,7 +204,6 @@ async def github_auth_start() -> Dict[str, Any]:
         )
     except Exception as e:
         out = err(e)
-
     _log_tool("github_auth_start", start, out)
     return out
 
@@ -147,7 +217,6 @@ async def github_auth_poll(device_code: str) -> Dict[str, Any]:
         out = ok({"status": status, **payload})
     except Exception as e:
         out = err(e)
-
     _log_tool("github_auth_poll", start, out)
     return out
 
@@ -160,29 +229,21 @@ def github_auth_status() -> Dict[str, Any]:
         out = ok(auth.status())
     except Exception as e:
         out = err(e)
-
     _log_tool("github_auth_status", start, out)
     return out
 
 
 @mcp.tool
-def github_auth_logout() -> Dict[str, Any]:
+async def github_repo_tree(
+    owner: str,
+    repo: str,
+    ref: str = "main",
+    max_items: int = 5000,
+    no_cache: bool = False,
+) -> dict:
     start = time.perf_counter()
     try:
-        auth = GitHubDeviceAuth(load_github_oauth_config())
-        out = ok(auth.logout())
-    except Exception as e:
-        out = err(e)
-
-    _log_tool("github_auth_logout", start, out)
-    return out
-
-
-@mcp.tool
-async def github_repo_tree(owner: str, repo: str, ref: str = "main", max_items: int = 5000, no_cache:bool = False) -> dict:
-    start = time.perf_counter()
-    try:
-        gh = GitHubClient()
+        gh = _get_github_client(no_cache=no_cache)
         data = await gh.repo_tree(owner=owner, repo=repo, ref=ref)
 
         full_tree = data.get("tree", []) or []
@@ -200,12 +261,18 @@ async def github_repo_tree(owner: str, repo: str, ref: str = "main", max_items: 
     except Exception as e:
         out = err(e)
 
-    _log_tool("github_repo_tree", start, out, owner=owner, repo=repo, ref=ref)
+    _log_tool("github_repo_tree", start, out, owner=owner, repo=repo, ref=ref, no_cache=no_cache)
     return out
 
 
 @mcp.tool
-async def github_read_file(owner: str, repo: str, path: str, ref: str = "main") -> dict:
+async def github_read_file(
+    owner: str,
+    repo: str,
+    path: str,
+    ref: str = "main",
+    no_cache: bool = False,
+) -> dict:
     start = time.perf_counter()
     try:
         policy = RepoPolicy()
@@ -217,7 +284,7 @@ async def github_read_file(owner: str, repo: str, path: str, ref: str = "main") 
                 details={"path": path},
             )
 
-        gh = GitHubClient()
+        gh = _get_github_client(no_cache=no_cache)
         item = await gh.read_file(owner=owner, repo=repo, path=path, ref=ref)
 
         if item.get("type") != "file":
@@ -245,7 +312,7 @@ async def github_read_file(owner: str, repo: str, path: str, ref: str = "main") 
     except Exception as e:
         out = err(e)
 
-    _log_tool("github_read_file", start, out, owner=owner, repo=repo, ref=ref, path=path)
+    _log_tool("github_read_file", start, out, owner=owner, repo=repo, ref=ref, path=path, no_cache=no_cache)
     return out
 
 
@@ -259,17 +326,8 @@ async def github_read_excerpt(
     tail_lines: int | None = None,
     start_line: int | None = None,
     end_line: int | None = None,
+    no_cache: bool = False,
 ) -> dict:
-    """
-    Token-efficient file reader.
-
-    Exactly one mode:
-      - head_lines=N
-      - tail_lines=N
-      - start_line + end_line (1-based, inclusive)
-
-    Returns excerpt + metadata, enforcing RepoPolicy denylist + max_file_bytes.
-    """
     start = time.perf_counter()
     try:
         # --- validate mode ---
@@ -326,7 +384,6 @@ async def github_read_excerpt(
                     details={"start_line": start_line, "end_line": end_line},
                 )
 
-        # --- policy ---
         policy = RepoPolicy()
         if policy.is_denied(path):
             raise RepoSenseError(
@@ -336,8 +393,7 @@ async def github_read_excerpt(
                 details={"path": path},
             )
 
-        # --- read file (contents api) ---
-        gh = GitHubClient()
+        gh = _get_github_client(no_cache=no_cache)
         item = await gh.read_file(owner=owner, repo=repo, path=path, ref=ref)
 
         if item.get("type") != "file":
@@ -361,11 +417,9 @@ async def github_read_excerpt(
         content_bytes = base64.b64decode(content_b64.encode("utf-8"), validate=False)
         text_full = content_bytes.decode("utf-8", errors="replace")
 
-        # split lines preserving newline characters (better for diffs + excerpt fidelity)
         lines = text_full.splitlines(keepends=True)
         total_lines = len(lines)
 
-        # compute slice (0-based python slice)
         if head_lines is not None:
             s0 = 0
             e0 = min(total_lines, head_lines)
@@ -373,17 +427,13 @@ async def github_read_excerpt(
             e0 = total_lines
             s0 = max(0, total_lines - tail_lines)
         else:
-            # start_line/end_line are 1-based inclusive
             s0 = min(total_lines, max(0, start_line - 1))
             e0 = min(total_lines, end_line)
 
-        excerpt_lines = lines[s0:e0]
-        excerpt_text = "".join(excerpt_lines)
+        excerpt_text = "".join(lines[s0:e0])
 
-        # 1-based inclusive result range (friendly for LLMs)
         out_start = s0 + 1 if total_lines > 0 and e0 > s0 else 0
         out_end = e0 if total_lines > 0 and e0 > s0 else 0
-
         truncated = not (s0 == 0 and e0 == total_lines)
 
         out = ok(
@@ -401,8 +451,9 @@ async def github_read_excerpt(
     except Exception as e:
         out = err(e)
 
-    _log_tool("github_read_excerpt", start, out, owner=owner, repo=repo, ref=ref, path=path)
+    _log_tool("github_read_excerpt", start, out, owner=owner, repo=repo, ref=ref, path=path, no_cache=no_cache)
     return out
+
 
 @mcp.tool
 def github_auth_logout() -> Dict[str, Any]:
@@ -411,17 +462,17 @@ def github_auth_logout() -> Dict[str, Any]:
         auth = GitHubDeviceAuth(load_github_oauth_config())
         logout_result = auth.logout()
 
-        ttl = float(getattr(settings, "cache_ttl_seconds", 300.0))
-        max_items = int(getattr(settings, "cache_max_items", 2048))
-        cache = default_cache(ttl_seconds=ttl, max_items=max_items)
-        cache.clear()
+        _cache_instance().clear()
+        _try_schedule_aclose()
 
-        out = ok({**logout_result, "cache_cleared": True})
+        out = ok({**logout_result, "cache_cleared": True, "clients_closing": True})
     except Exception as e:
         out = err(e)
 
     _log_tool("github_auth_logout", start, out)
     return out
+
+
 @mcp.tool
 async def github_repo_snapshot(
     owner: str,
@@ -429,25 +480,18 @@ async def github_repo_snapshot(
     ref: str = "main",
     max_files: int = 20,
     max_chars_per_file: int = 20_000,
+    no_cache: bool = False,
 ) -> dict:
-    """
-    Create a compact snapshot of a repo: stack detection, entrypoints, and key files content.
-
-    - Uses git tree to pick important files
-    - Reads up to `max_files` files, respecting RepoPolicy denylist + max bytes
-    - Returns structured data suitable for planning code changes
-    """
     start = time.perf_counter()
     try:
         from collections import Counter
 
         policy = RepoPolicy()
-        gh = GitHubClient()
+        gh = _get_github_client(no_cache=no_cache)
 
         tree_data = await gh.repo_tree(owner=owner, repo=repo, ref=ref)
         tree = tree_data.get("tree", []) or []
 
-        # Only blobs (files)
         blobs = [t for t in tree if t.get("type") == "blob" and t.get("path")]
         paths = [t["path"] for t in blobs]
 
@@ -455,17 +499,14 @@ async def github_repo_snapshot(
         top_dirs = Counter()
 
         for p in paths:
-            # extension stats
             if "." in p.rsplit("/", 1)[-1]:
                 exts[p.rsplit(".", 1)[-1].lower()] += 1
             else:
                 exts["(no_ext)"] += 1
 
-            # top dir stats
             top = p.split("/", 1)[0] if "/" in p else "(root)"
             top_dirs[top] += 1
 
-        # ---- Heuristics: rank important files ----
         priority_exact = [
             "README.md",
             "readme.md",
@@ -487,23 +528,8 @@ async def github_repo_snapshot(
             ".gitignore",
         ]
 
-        priority_prefix = [
-            ".github/workflows/",
-            "docs/",
-            "src/",
-            "include/",
-        ]
-
-        priority_suffix = [
-            ".py",
-            ".cpp",
-            ".cc",
-            ".cxx",
-            ".c",
-            ".h",
-            ".hpp",
-            ".md",
-        ]
+        priority_prefix = [".github/workflows/", "docs/", "src/", "include/"]
+        priority_suffix = [".py", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp", ".md"]
 
         def score(p: str) -> int:
             s = 0
@@ -515,10 +541,8 @@ async def github_repo_snapshot(
             for suf in priority_suffix:
                 if p.endswith(suf):
                     s += 50
-            # Favor top-level files
             if "/" not in p:
                 s += 300
-            # Favor likely entrypoints
             low = p.lower()
             if low in ("main.py", "app.py", "server.py", "__main__.py"):
                 s += 2000
@@ -528,7 +552,6 @@ async def github_repo_snapshot(
 
         ranked = sorted(paths, key=score, reverse=True)
 
-        # Filter denylist + keep only unique, best candidates
         selected: list[str] = []
         for p in ranked:
             if policy.is_denied(p):
@@ -564,7 +587,6 @@ async def github_repo_snapshot(
 
             files_out.append({"path": p, "size": size, "text": text})
 
-        # ---- Stack detection ----
         pathset = set(paths)
         stack = {
             "python": any(p in pathset for p in ("pyproject.toml", "requirements.txt", "setup.py", "setup.cfg"))
@@ -574,7 +596,6 @@ async def github_repo_snapshot(
             "node": "package.json" in pathset,
         }
 
-        # ---- Entrypoints (best guesses) ----
         entrypoints: list[str] = []
         candidates = [
             "main.py",
@@ -621,5 +642,5 @@ async def github_repo_snapshot(
     except Exception as e:
         out = err(e)
 
-    _log_tool("github_repo_snapshot", start, out, owner=owner, repo=repo, ref=ref)
+    _log_tool("github_repo_snapshot", start, out, owner=owner, repo=repo, ref=ref, no_cache=no_cache)
     return out

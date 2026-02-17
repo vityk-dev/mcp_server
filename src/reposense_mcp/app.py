@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import time
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from reposense_mcp.logging_config import configure_logging, get_logger, new_request_id
-from reposense_mcp.server import mcp
-from reposense_mcp.mcp.context import set_request_id, clear_request_id
+from reposense_mcp.mcp.context import clear_request_id, set_request_id
+from reposense_mcp.server import aclose_github_clients, mcp
 
 
 def create_api() -> FastAPI:
@@ -20,7 +22,16 @@ def create_api() -> FastAPI:
     log = get_logger("reposense_mcp.app")
 
     mcp_app = mcp.http_app(path="/")
-    api = FastAPI(title="RepoSense MCP", version="0.1.0", lifespan=mcp_app.lifespan)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Delegate startup/shutdown to FastMCP, and then do our own cleanup.
+        async with mcp_app.lifespan(app):
+            yield
+        # After FastMCP shutdown completes, close shared HTTP clients.
+        await aclose_github_clients()
+
+    api = FastAPI(title="RepoSense MCP", version="0.1.0", lifespan=lifespan)
 
     @api.middleware("http")
     async def log_requests(request, call_next):
@@ -52,7 +63,6 @@ def create_api() -> FastAPI:
             )
             raise
         finally:
-            # Prevent rid bleed between requests (important for tests + correctness)
             clear_request_id()
 
     @api.get("/health")

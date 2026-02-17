@@ -6,7 +6,6 @@ from typing import Any, Dict, Optional
 import time
 
 import httpx
-import hashlib
 
 from reposense_mcp.github.token_store import TokenStore
 from reposense_mcp.logging_config import get_logger
@@ -33,6 +32,17 @@ class GitHubClient:
             ttl = float(getattr(settings, "cache_ttl_seconds", 300.0))
             max_items = int(getattr(settings, "cache_max_items", 2048))
             self._cache = default_cache(ttl_seconds=ttl, max_items=max_items)
+
+        # Reuse a single AsyncClient for connection pooling.
+        # IMPORTANT: we still pass per-request headers, because token can change.
+        self._http = httpx.AsyncClient(timeout=self.cfg.timeout_s)
+
+    async def aclose(self) -> None:
+        """Close underlying HTTP resources."""
+        try:
+            await self._http.aclose()
+        except Exception:
+            pass
 
     def _token(self) -> str:
         token = self.store.load()
@@ -64,7 +74,6 @@ class GitHubClient:
     def _cache_set(self, key: str, value: Any, *, ttl_seconds: float | None = None) -> None:
         if not self._cache:
             return
-        # TTLCache supports per-entry ttl override via ttl_seconds
         self._cache.set(key, value, ttl_seconds=ttl_seconds)
 
     def _ttl_for_ref(self, ref: str) -> float:
@@ -76,14 +85,7 @@ class GitHubClient:
     def _cache_log(self, event: str, **fields: Any) -> None:
         if not getattr(settings, "cache_log_events", False):
             return
-        if "key" in fields and isinstance(fields["key"], str):
-            fields["key"] = self._log_key(fields["key"])
         log.info(event, rid=ensure_request_id(), **fields)
-            
-    def _log_key(self, key: str) -> str:
-        if getattr(settings, "cache_log_keys", False):
-            return key
-        return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
 
     def _log_http_error(
         self,
@@ -155,8 +157,7 @@ class GitHubClient:
     async def resolve_ref_to_sha(self, owner: str, repo: str, ref: str) -> str:
         """
         Resolve a branch name like 'main' to a commit SHA using Git refs.
-        IMPORTANT: We do NOT cache this, to avoid cross-test pollution and because
-        refs can move.
+        IMPORTANT: We do NOT cache this, to avoid cross-test pollution and because refs can move.
         """
         ref = ref.strip()
         if self._looks_like_sha(ref):
@@ -165,41 +166,40 @@ class GitHubClient:
         url = f"{self.cfg.api_base}/repos/{owner}/{repo}/git/refs/heads/{ref}"
 
         start = time.perf_counter()
-        async with httpx.AsyncClient(timeout=self.cfg.timeout_s) as client:
-            r = await client.get(url, headers=self._headers())
-            elapsed_ms = int((time.perf_counter() - start) * 1000)
+        r = await self._http.get(url, headers=self._headers())
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
 
-            try:
-                r.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                self._log_http_error(
-                    action="resolve_ref_to_sha",
-                    method="GET",
-                    url=str(r.request.url),
-                    status_code=r.status_code,
-                    body=r.text,
-                    elapsed_ms=elapsed_ms,
-                    owner=owner,
-                    repo=repo,
-                    ref=ref,
-                )
-                raise RuntimeError(
-                    f"Failed to resolve ref '{ref}' to sha for {owner}/{repo}. "
-                    f"HTTP {r.status_code}: {r.text}"
-                ) from e
-
-            self._log_http_ok(
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            self._log_http_error(
                 action="resolve_ref_to_sha",
                 method="GET",
                 url=str(r.request.url),
                 status_code=r.status_code,
+                body=r.text,
                 elapsed_ms=elapsed_ms,
                 owner=owner,
                 repo=repo,
                 ref=ref,
             )
+            raise RuntimeError(
+                f"Failed to resolve ref '{ref}' to sha for {owner}/{repo}. "
+                f"HTTP {r.status_code}: {r.text}"
+            ) from e
 
-            j = r.json()
+        self._log_http_ok(
+            action="resolve_ref_to_sha",
+            method="GET",
+            url=str(r.request.url),
+            status_code=r.status_code,
+            elapsed_ms=elapsed_ms,
+            owner=owner,
+            repo=repo,
+            ref=ref,
+        )
+
+        j = r.json()
 
         sha = j.get("object", {}).get("sha")
         if not sha:
@@ -218,83 +218,57 @@ class GitHubClient:
     async def repo_tree(self, owner: str, repo: str, ref: str) -> Dict[str, Any]:
         sha = await self.resolve_ref_to_sha(owner=owner, repo=repo, ref=ref)
 
-        cache_key = make_key("github", "repo_tree", owner, repo, sha, "recursive=1")
+        cache_key = make_key("github", "repo_tree", owner, repo, ref, sha, "recursive=1")
         cached = self._cache_get(cache_key)
         if cached is not None:
-            self._cache_log(
-                "github_cache_hit",
-                action="repo_tree",
-                key=cache_key,
-                owner=owner,
-                repo=repo,
-                ref=ref,
-                sha=sha,
-            )
+            self._cache_log("github_cache_hit", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref, sha=sha)
             return cached
 
-        self._cache_log(
-            "github_cache_miss",
-            action="repo_tree",
-            key=cache_key,
-            owner=owner,
-            repo=repo,
-            ref=ref,
-            sha=sha,
-        )
+        self._cache_log("github_cache_miss", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref, sha=sha)
+
         url = f"{self.cfg.api_base}/repos/{owner}/{repo}/git/trees/{sha}"
 
         start = time.perf_counter()
-        async with httpx.AsyncClient(timeout=self.cfg.timeout_s) as client:
-            r = await client.get(url, params={"recursive": "1"}, headers=self._headers())
-            elapsed_ms = int((time.perf_counter() - start) * 1000)
+        r = await self._http.get(url, params={"recursive": "1"}, headers=self._headers())
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
 
-            try:
-                r.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                self._log_http_error(
-                    action="repo_tree",
-                    method="GET",
-                    url=str(r.request.url),
-                    status_code=r.status_code,
-                    body=r.text,
-                    elapsed_ms=elapsed_ms,
-                    owner=owner,
-                    repo=repo,
-                    ref=ref,
-                    extra={"sha": sha},
-                )
-                raise RuntimeError(
-                    f"Failed to fetch repo tree for {owner}/{repo}@{ref} (sha={sha}). "
-                    f"HTTP {r.status_code}: {r.text}"
-                ) from e
-
-            self._log_http_ok(
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            self._log_http_error(
                 action="repo_tree",
                 method="GET",
                 url=str(r.request.url),
                 status_code=r.status_code,
+                body=r.text,
                 elapsed_ms=elapsed_ms,
                 owner=owner,
                 repo=repo,
                 ref=ref,
                 extra={"sha": sha},
             )
+            raise RuntimeError(
+                f"Failed to fetch repo tree for {owner}/{repo}@{ref} (sha={sha}). "
+                f"HTTP {r.status_code}: {r.text}"
+            ) from e
 
-            data = r.json()
-
-        # cache only successful responses
-        ttl_used = self._ttl_for_ref(ref)
-        self._cache_set(cache_key, data, ttl_seconds=ttl_used)
-        self._cache_log(
-            "github_cache_set",
+        self._log_http_ok(
             action="repo_tree",
-            key=cache_key,
+            method="GET",
+            url=str(r.request.url),
+            status_code=r.status_code,
+            elapsed_ms=elapsed_ms,
             owner=owner,
             repo=repo,
             ref=ref,
-            sha=sha,
-            ttl_seconds=ttl_used,
+            extra={"sha": sha},
         )
+
+        data = r.json()
+
+        ttl_used = self._ttl_for_ref(ref)
+        self._cache_set(cache_key, data, ttl_seconds=ttl_used)
+        self._cache_log("github_cache_set", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref, sha=sha, ttl_seconds=ttl_used)
         return data
 
     async def read_file(self, owner: str, repo: str, path: str, ref: str) -> Dict[str, Any]:
@@ -302,78 +276,52 @@ class GitHubClient:
         cache_key = make_key("github", "read_file", owner, repo, ref, path)
         cached = self._cache_get(cache_key)
         if cached is not None:
-            self._cache_log(
-                "github_cache_hit",
-                action="read_file",
-                key=cache_key,
-                owner=owner,
-                repo=repo,
-                ref=ref,
-                path=path,
-            )
+            self._cache_log("github_cache_hit", action="read_file", key=cache_key, owner=owner, repo=repo, ref=ref, path=path)
             return cached
 
-        self._cache_log(
-            "github_cache_miss",
-            action="read_file",
-            key=cache_key,
-            owner=owner,
-            repo=repo,
-            ref=ref,
-            path=path,
-        )
+        self._cache_log("github_cache_miss", action="read_file", key=cache_key, owner=owner, repo=repo, ref=ref, path=path)
 
         url = f"{self.cfg.api_base}/repos/{owner}/{repo}/contents/{path}"
 
         start = time.perf_counter()
-        async with httpx.AsyncClient(timeout=self.cfg.timeout_s) as client:
-            r = await client.get(url, params={"ref": ref}, headers=self._headers())
-            elapsed_ms = int((time.perf_counter() - start) * 1000)
+        r = await self._http.get(url, params={"ref": ref}, headers=self._headers())
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
 
-            try:
-                r.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                self._log_http_error(
-                    action="read_file",
-                    method="GET",
-                    url=str(r.request.url),
-                    status_code=r.status_code,
-                    body=r.text,
-                    elapsed_ms=elapsed_ms,
-                    owner=owner,
-                    repo=repo,
-                    ref=ref,
-                    path=path,
-                )
-                raise RuntimeError(
-                    f"Failed to read file {owner}/{repo}:{path}@{ref}. "
-                    f"HTTP {r.status_code}: {r.text}"
-                ) from e
-
-            self._log_http_ok(
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            self._log_http_error(
                 action="read_file",
                 method="GET",
                 url=str(r.request.url),
                 status_code=r.status_code,
+                body=r.text,
                 elapsed_ms=elapsed_ms,
                 owner=owner,
                 repo=repo,
                 ref=ref,
                 path=path,
             )
+            raise RuntimeError(
+                f"Failed to read file {owner}/{repo}:{path}@{ref}. "
+                f"HTTP {r.status_code}: {r.text}"
+            ) from e
 
-            data = r.json()
-
-        ttl_used = self._ttl_for_ref(ref)
-        self._cache_set(cache_key, data, ttl_seconds=ttl_used)
-        self._cache_log(
-            "github_cache_set",
+        self._log_http_ok(
             action="read_file",
-            key=cache_key,
+            method="GET",
+            url=str(r.request.url),
+            status_code=r.status_code,
+            elapsed_ms=elapsed_ms,
             owner=owner,
             repo=repo,
             ref=ref,
             path=path,
-            ttl_seconds=ttl_used,
         )
+
+        data = r.json()
+
+        ttl_used = self._ttl_for_ref(ref)
+        self._cache_set(cache_key, data, ttl_seconds=ttl_used)
+        self._cache_log("github_cache_set", action="read_file", key=cache_key, owner=owner, repo=repo, ref=ref, path=path, ttl_seconds=ttl_used)
         return data

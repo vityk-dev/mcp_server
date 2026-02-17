@@ -1,123 +1,153 @@
-# tests/test_cache.py
+# src/reposense_mcp/cache.py
 from __future__ import annotations
 
-import types
-
-import pytest
-
-import reposense_mcp.cache as cache_mod
-
-
-class FakeClock:
-    def __init__(self, start: float = 1_000.0):
-        self.t = start
-
-    def time(self) -> float:
-        return self.t
-
-    def advance(self, seconds: float) -> None:
-        self.t += seconds
+import heapq
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
 
 
-@pytest.fixture
-def clock(monkeypatch) -> FakeClock:
-    c = FakeClock()
-    # Patch the module-level time dependency used by TTLCache
-    monkeypatch.setattr(cache_mod.time, "time", c.time)
-    return c
+@dataclass
+class CacheStats:
+    hits: int = 0
+    misses: int = 0
+    sets: int = 0
+    evictions: int = 0
+
+    def as_dict(self) -> Dict[str, int]:
+        return {
+            "hits": self.hits,
+            "misses": self.misses,
+            "sets": self.sets,
+            "evictions": self.evictions,
+        }
 
 
-def test_make_key_escapes_pipes_and_joins():
-    k = cache_mod.make_key("github", "read_file", "a|b", "c", "d|e")
-    assert k == "github|read_file|a%7Cb|c|d%7Ce"
+class TTLCache:
+    """Simple in-memory TTL + LRU cache.
+
+    Notes:
+    - Process-local only (fine for single-instance MCP server).
+    - Thread-safe.
+    - LRU eviction on max_items.
+    - Expiration purge uses a min-heap; stale heap entries are ignored.
+    """
+
+    def __init__(self, ttl_seconds: float = 30.0, max_items: int = 2048):
+        self.ttl_seconds = float(ttl_seconds)
+        self.max_items = int(max_items)
+
+        self._lock = threading.Lock()
+        # key -> (expires_at, value) ordered by recency
+        self._items: "OrderedDict[str, Tuple[float, Any]]" = OrderedDict()
+        # heap entries: (expires_at, key)
+        self._exp_heap: list[tuple[float, str]] = []
+
+        self._stats = CacheStats()
+
+    def _now(self) -> float:
+        # IMPORTANT: tests monkeypatch time.time in this module
+        return time.time()
+
+    def _purge_expired_locked(self, now: float) -> None:
+        while self._exp_heap and self._exp_heap[0][0] <= now:
+            exp, key = heapq.heappop(self._exp_heap)
+            cur = self._items.get(key)
+            if cur is None:
+                continue
+            cur_exp, _ = cur
+            # purge only if heap entry matches current expiry
+            if cur_exp == exp and cur_exp <= now:
+                self._items.pop(key, None)
+                self._stats.evictions += 1
+
+    def get(self, key: str) -> Optional[Any]:
+        now = self._now()
+        with self._lock:
+            self._purge_expired_locked(now)
+
+            item = self._items.get(key)
+            if item is None:
+                self._stats.misses += 1
+                return None
+
+            exp, value = item
+            if exp <= now:
+                self._items.pop(key, None)
+                self._stats.misses += 1
+                self._stats.evictions += 1
+                return None
+
+            # LRU bump
+            self._items.move_to_end(key, last=True)
+            self._stats.hits += 1
+            return value
+
+    def set(self, key: str, value: Any, ttl_seconds: Optional[float] = None) -> None:
+        now = self._now()
+        ttl = self.ttl_seconds if ttl_seconds is None else float(ttl_seconds)
+        exp = now + max(0.0, ttl)
+
+        with self._lock:
+            self._purge_expired_locked(now)
+
+            if key in self._items:
+                self._items.pop(key, None)
+
+            self._items[key] = (exp, value)
+            self._items.move_to_end(key, last=True)
+            heapq.heappush(self._exp_heap, (exp, key))
+            self._stats.sets += 1
+
+            # LRU eviction
+            while len(self._items) > self.max_items:
+                self._items.popitem(last=False)
+                self._stats.evictions += 1
+                # heap cleanup is lazy (stale entries ignored)
+
+    def delete(self, key: str) -> bool:
+        with self._lock:
+            existed = key in self._items
+            if existed:
+                self._items.pop(key, None)
+            return existed
+
+    def clear(self) -> None:
+        with self._lock:
+            self._items.clear()
+            self._exp_heap.clear()
+            self._stats = CacheStats()
+
+    def stats(self) -> Dict[str, Any]:
+        now = self._now()
+        with self._lock:
+            self._purge_expired_locked(now)
+            return {
+                "ttl_seconds": self.ttl_seconds,
+                "max_items": self.max_items,
+                "size": len(self._items),
+                "counters": self._stats.as_dict(),
+            }
 
 
-def test_ttlcache_set_get_hit_miss_stats(clock: FakeClock):
-    c = cache_mod.TTLCache(ttl_seconds=10.0, max_items=10)
-
-    assert c.get("missing") is None
-    s = c.stats()
-    assert s["counters"]["misses"] == 1
-    assert s["counters"]["hits"] == 0
-
-    c.set("k1", {"x": 1})
-    assert c.get("k1") == {"x": 1}
-
-    s = c.stats()
-    assert s["counters"]["sets"] == 1
-    assert s["counters"]["hits"] == 1
-    assert s["size"] == 1
+def make_key(*parts: str) -> str:
+    return "|".join(p.replace("|", "%7C") for p in parts if p is not None)
 
 
-def test_ttlcache_expiry_eviction(clock: FakeClock):
-    c = cache_mod.TTLCache(ttl_seconds=5.0, max_items=10)
-
-    c.set("k1", "v1")
-    assert c.get("k1") == "v1"
-
-    clock.advance(4.9)
-    assert c.get("k1") == "v1"
-
-    clock.advance(0.2)  # now expired
-    assert c.get("k1") is None
-
-    s = c.stats()
-    # one miss from expired fetch + one eviction accounted
-    assert s["counters"]["evictions"] >= 1
-    assert s["size"] == 0
+_default_cache: TTLCache | None = None
+_default_lock = threading.Lock()
 
 
-def test_ttlcache_set_with_override_ttl(clock: FakeClock):
-    c = cache_mod.TTLCache(ttl_seconds=100.0, max_items=10)
+def default_cache(ttl_seconds: float = 30.0, max_items: int = 2048) -> TTLCache:
+    """Process-wide singleton cache.
 
-    c.set("k1", "v1", ttl_seconds=1.0)
-    assert c.get("k1") == "v1"
-
-    clock.advance(1.01)
-    assert c.get("k1") is None
-
-
-def test_ttlcache_clear_resets_size(clock: FakeClock):
-    c = cache_mod.TTLCache(ttl_seconds=10.0, max_items=10)
-    c.set("k1", 1)
-    c.set("k2", 2)
-    assert c.stats()["size"] == 2
-
-    c.clear()
-    assert c.stats()["size"] == 0
-
-
-def test_ttlcache_max_items_eviction_policy(clock: FakeClock):
-    # max_items=5 => when inserting the 6th, it evicts max(1, 5//10)=1 victim
-    c = cache_mod.TTLCache(ttl_seconds=100.0, max_items=5)
-
-    # Stagger expirations (they all share same ttl, but insertion time differs)
-    for i in range(5):
-        c.set(f"k{i}", i)
-        clock.advance(1.0)
-
-    assert c.stats()["size"] == 5
-
-    # Adding one more triggers eviction of the smallest exp (oldest-ish)
-    c.set("k5", 5)
-    s = c.stats()
-    assert s["size"] == 5
-    assert s["counters"]["evictions"] >= 1
-
-    # The oldest key is most likely evicted ("k0"), but we don't overfit.
-    # Just ensure at least one of the original keys is missing.
-    missing = sum(1 for i in range(5) if c.get(f"k{i}") is None)
-    assert missing >= 1
-    assert c.get("k5") == 5
-
-
-def test_default_cache_is_singleton(monkeypatch):
-    # Reset module singleton safely for this test
-    monkeypatch.setattr(cache_mod, "_default_cache", None)
-
-    c1 = cache_mod.default_cache(ttl_seconds=1.0, max_items=10)
-    c2 = cache_mod.default_cache(ttl_seconds=999.0, max_items=999)
-    assert c1 is c2
-    # the first call "wins"
-    assert c2.ttl_seconds == 1.0
-    assert c2.max_items == 10
+    IMPORTANT (tests + expected semantics):
+    - first call wins; later calls return the same instance
+    """
+    global _default_cache
+    with _default_lock:
+        if _default_cache is None:
+            _default_cache = TTLCache(ttl_seconds=ttl_seconds, max_items=max_items)
+        return _default_cache

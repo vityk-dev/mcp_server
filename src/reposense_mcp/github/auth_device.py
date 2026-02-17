@@ -1,6 +1,6 @@
+# src/reposense_mcp/github/auth_device.py
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -9,12 +9,15 @@ import httpx
 from reposense_mcp.github.config import GitHubOAuthConfig
 from reposense_mcp.github.token_store import TokenData, TokenStore
 
+
 def _http_error_details(e: httpx.HTTPStatusError) -> str:
-        r = e.response
-        try:
-            return f"status={r.status_code} url={r.request.url} body={r.text}"
-        except Exception:
-            return f"status={r.status_code} url={r.request.url} (no body)"
+    r = e.response
+    try:
+        return f"status={r.status_code} url={r.request.url} body={r.text}"
+    except Exception:
+        return f"status={r.status_code} url={r.request.url} (no body)"
+
+
 @dataclass(frozen=True)
 class DeviceCode:
     device_code: str
@@ -30,11 +33,12 @@ class GitHubDeviceAuth:
         self.store = store or TokenStore()
 
     async def start(self) -> DeviceCode:
+        # IMPORTANT: tests assert client_id is in URL query string
         async with httpx.AsyncClient(timeout=30) as client:
             try:
                 r = await client.post(
                     self.cfg.device_code_url,
-                    params={"client_id": self.cfg.client_id},  # per GitHub docs  [oai_citation:1‡GitHub Docs](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app)
+                    params={"client_id": self.cfg.client_id},
                     headers={
                         "Accept": "application/json",
                         "Content-Type": "application/x-www-form-urlencoded",
@@ -60,17 +64,21 @@ class GitHubDeviceAuth:
         status: "pending" | "slow_down" | "denied" | "expired" | "error" | "authorized"
         """
         async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(
-                self.cfg.token_url,
-                data={
-                    "client_id": self.cfg.client_id,
-                    "client_secret": self.cfg.client_secret,
-                    "device_code": device_code,
-                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                },
-                headers={"Accept": "application/json"},
-            )
-            r.raise_for_status()
+            try:
+                r = await client.post(
+                    self.cfg.token_url,
+                    data={
+                        "client_id": self.cfg.client_id,
+                        "client_secret": self.cfg.client_secret,
+                        "device_code": device_code,
+                        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                    },
+                    headers={"Accept": "application/json"},
+                )
+                r.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                raise RuntimeError(f"GitHub access_token failed: {_http_error_details(e)}") from e
+
             j = r.json()
 
         if "access_token" in j:
@@ -85,7 +93,6 @@ class GitHubDeviceAuth:
             self.store.save(token)
             return "authorized", {"token_saved": True, "expires_in": token.expires_in}
 
-        # Error cases per GitHub docs
         err = j.get("error")
         if err == "authorization_pending":
             return "pending", {}
@@ -97,12 +104,13 @@ class GitHubDeviceAuth:
             return "expired", {"error": err}
 
         return "error", {"error": err or "unknown", "error_description": j.get("error_description")}
-    
 
-    
     def status(self) -> Dict[str, Any]:
         token = self.store.load()
-        return {"authorized": bool(token), "token": (token.__dict__ if token else None)}
+        return {
+            "authorized": bool(token and token.access_token),
+            "token": (token.__dict__ if token else None),
+        }
 
     def logout(self) -> Dict[str, Any]:
         self.store.clear()
