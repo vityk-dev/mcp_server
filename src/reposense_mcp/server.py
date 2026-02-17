@@ -472,31 +472,22 @@ def github_auth_logout() -> Dict[str, Any]:
     _log_tool("github_auth_logout", start, out)
     return out
 
-@mcp.tool
-def github_rate_limit_status() -> Dict[str, Any]:
-    """
-    Return the last observed GitHub rate limit headers (best-effort).
-    Useful for debugging throttling / limits in production.
+# --- w src/reposense_mcp/server.py dodaj to w sekcji Tools (np. po github_cache_stats) ---
 
-    Returns state for both clients:
-      - cached client
-      - nocache client
+@mcp.tool
+def github_rate_limit_status(no_cache: bool = False) -> Dict[str, Any]:
+    """
+    Returns last observed GitHub rate-limit snapshots inferred from response headers.
+    Useful for debugging / observability.
     """
     start = time.perf_counter()
     try:
-        gh_cached = _get_github_client(no_cache=False)
-        gh_nocache = _get_github_client(no_cache=True)
-
-        out = ok(
-            {
-                "cached": gh_cached.rate_limit_status(),
-                "nocache": gh_nocache.rate_limit_status(),
-            }
-        )
+        gh = _get_github_client(no_cache=no_cache)
+        out = ok(gh.rate_limit_status())
     except Exception as e:
         out = err(e)
 
-    _log_tool("github_rate_limit_status", start, out)
+    _log_tool("github_rate_limit_status", start, out, no_cache=no_cache)
     return out
 
 

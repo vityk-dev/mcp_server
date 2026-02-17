@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 import time
 import threading
+import hashlib
+import json
 
 import httpx
 
@@ -13,6 +15,8 @@ from reposense_mcp.logging_config import get_logger
 from reposense_mcp.mcp.context import ensure_request_id
 from reposense_mcp.config import settings
 from reposense_mcp.cache import default_cache, make_key
+from reposense_mcp.errors import RepoSenseError
+from reposense_mcp.github.rate_limit import RateLimitSnapshot, parse_rate_limit_headers
 
 log = get_logger("reposense_mcp.github")
 
@@ -23,41 +27,17 @@ class GitHubClientConfig:
     timeout_s: float = 30.0
 
 
-@dataclass
-class RateLimitState:
-    """Last observed GitHub rate limit headers."""
-    observed_at_ms: int | None = None
+def _safe_json(text: str) -> dict[str, Any] | None:
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
 
-    limit: int | None = None
-    remaining: int | None = None
-    used: int | None = None
-    reset_epoch_s: int | None = None
 
-    resource: str | None = None
-
-    # secondary / abuse signals
-    retry_after_s: int | None = None
-
-    # last request metadata (for debugging)
-    last_method: str | None = None
-    last_url: str | None = None
-    last_status: int | None = None
-    last_action: str | None = None
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "observed_at_ms": self.observed_at_ms,
-            "limit": self.limit,
-            "remaining": self.remaining,
-            "used": self.used,
-            "reset_epoch_s": self.reset_epoch_s,
-            "resource": self.resource,
-            "retry_after_s": self.retry_after_s,
-            "last_method": self.last_method,
-            "last_url": self.last_url,
-            "last_status": self.last_status,
-            "last_action": self.last_action,
-        }
+def _token_fingerprint(token: str) -> str:
+    # Do NOT log/store raw tokens. Fingerprint allows distinguishing sessions safely.
+    h = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return h[:12]
 
 
 class GitHubClient:
@@ -71,13 +51,17 @@ class GitHubClient:
             max_items = int(getattr(settings, "cache_max_items", 2048))
             self._cache = default_cache(ttl_seconds=ttl, max_items=max_items)
 
-        # Rate limit state (thread-safe)
-        self._rl_lock = threading.Lock()
-        self._rate_limit = RateLimitState()
-
         # Reuse a single AsyncClient for connection pooling.
         # IMPORTANT: we still pass per-request headers, because token can change.
         self._http = httpx.AsyncClient(timeout=self.cfg.timeout_s)
+
+        # ---- Rate limit tracking (process-local per client instance) ----
+        self._rl_lock = threading.Lock()
+        # keyed by (token_fp, resource|unknown)
+        self._rate_limits: dict[tuple[str, str], RateLimitSnapshot] = {}
+
+        # You can optionally tune this in Settings later; default is "only log when enabled".
+        self._rl_log_enabled = getattr(settings, "github_log_success", False) or getattr(settings, "cache_log_events", False)
 
     async def aclose(self) -> None:
         """Close underlying HTTP resources."""
@@ -85,11 +69,6 @@ class GitHubClient:
             await self._http.aclose()
         except Exception:
             pass
-
-    def rate_limit_status(self) -> dict[str, Any]:
-        """Return last observed rate limit headers (if any)."""
-        with self._rl_lock:
-            return self._rate_limit.as_dict()
 
     def _token(self) -> str:
         token = self.store.load()
@@ -134,99 +113,148 @@ class GitHubClient:
             return
         log.info(event, rid=ensure_request_id(), **fields)
 
-    @staticmethod
-    def _h_int(headers: httpx.Headers, name: str) -> int | None:
-        v = headers.get(name)
-        if v is None:
-            return None
-        v = v.strip()
-        if not v:
-            return None
+    # ---------------------------
+    # Rate limit tracking
+    # ---------------------------
+    def _update_rate_limit(self, r: httpx.Response, *, action: str) -> None:
+        snap = parse_rate_limit_headers(
+            r.headers,
+            status_code=r.status_code,
+            url=str(r.request.url) if r.request else None,
+            action=action,
+        )
+        if not snap:
+            return
+
         try:
-            return int(v)
+            token_fp = _token_fingerprint(self._token())
         except Exception:
-            return None
+            # If token isn't available, keep a generic bucket.
+            token_fp = "unknown"
 
-    @staticmethod
-    def _h_str(headers: httpx.Headers, name: str) -> str | None:
-        v = headers.get(name)
-        if v is None:
-            return None
-        v = v.strip()
-        return v or None
-
-    def _update_rate_limit_from_response(self, *, action: str, r: httpx.Response) -> None:
-        """
-        Parse GitHub rate limit headers and store last observed state.
-
-        Headers:
-          - X-RateLimit-Limit
-          - X-RateLimit-Remaining
-          - X-RateLimit-Used
-          - X-RateLimit-Reset (unix epoch seconds)
-          - X-RateLimit-Resource (optional)
-          - Retry-After (secondary rate limit / abuse prevention)
-        """
-        h = r.headers
-        limit = self._h_int(h, "X-RateLimit-Limit")
-        remaining = self._h_int(h, "X-RateLimit-Remaining")
-        used = self._h_int(h, "X-RateLimit-Used")
-        reset = self._h_int(h, "X-RateLimit-Reset")
-        resource = self._h_str(h, "X-RateLimit-Resource")
-        retry_after = self._h_int(h, "Retry-After")
-
-        # If none present, still record last request metadata (useful for debugging)
-        now_ms = int(time.time() * 1000)
+        resource = snap.resource or "unknown"
+        key = (token_fp, resource)
 
         with self._rl_lock:
-            st = self._rate_limit
-            st.observed_at_ms = now_ms
+            prev = self._rate_limits.get(key)
+            self._rate_limits[key] = snap
 
-            if limit is not None:
-                st.limit = limit
-            if remaining is not None:
-                st.remaining = remaining
-            if used is not None:
-                st.used = used
-            if reset is not None:
-                st.reset_epoch_s = reset
-            if resource is not None:
-                st.resource = resource
-            if retry_after is not None:
-                st.retry_after_s = retry_after
+        # Optional logging (production-friendly; doesn’t spam unless enabled)
+        # You can adjust policy later; this is a sane default.
+        if getattr(settings, "github_log_success", False):
+            # log only when remaining is low or request was a rate-limit response
+            remaining = snap.remaining
+            low = (remaining is not None and remaining <= 20)
+            limited = r.status_code in (429, 403) and (snap.retry_after_s is not None or (snap.remaining == 0))
+            if low or limited:
+                log.warning(
+                    "github_rate_limit_observed",
+                    rid=ensure_request_id(),
+                    resource=resource,
+                    limit=snap.limit,
+                    remaining=remaining,
+                    used=snap.used,
+                    reset_epoch_s=snap.reset_epoch_s,
+                    seconds_until_reset=snap.seconds_until_reset(),
+                    retry_after_s=snap.retry_after_s,
+                    status_code=r.status_code,
+                    action=action,
+                )
 
-            st.last_method = r.request.method
-            st.last_url = str(r.request.url)
-            st.last_status = r.status_code
-            st.last_action = action
+    def rate_limit_status(self) -> Dict[str, Any]:
+        """
+        Returns latest observed RL snapshots.
 
-            # snapshot after update for logging
-            remaining_now = st.remaining
-            limit_now = st.limit
-            reset_now = st.reset_epoch_s
+        Backward-compatible shape:
+          - data["cached"] -> latest snapshot for the current token (any resource), or None
 
-        # Logging policy (outside lock)
-        warn_threshold = int(getattr(settings, "github_rate_limit_warn_remaining", 50))
-        should_warn = remaining_now is not None and remaining_now <= warn_threshold
-        should_log = bool(getattr(settings, "github_rate_limit_log", False))
+        Rich shape:
+          - data["token_fingerprint"]
+          - data["resources"] -> mapping "<token_fp>:<resource>" -> snapshot dict
+        """
+        try:
+            token_fp = _token_fingerprint(self._token())
+        except Exception:
+            token_fp = "unknown"
 
-        if should_log or should_warn:
-            level_fn = log.warning if should_warn else log.info
-            level_fn(
-                "github_rate_limit",
-                rid=ensure_request_id(),
-                action=action,
-                method=r.request.method,
-                url=str(r.request.url),
-                status_code=r.status_code,
-                limit=limit_now,
-                remaining=remaining_now,
-                used=used,
-                reset_epoch_s=reset_now,
-                resource=resource,
-                retry_after_s=retry_after,
-            )
+        resources: dict[str, Any] = {}
+        latest: RateLimitSnapshot | None = None
 
+        with self._rl_lock:
+            # include token_fp + unknown (useful before auth)
+            for (tfp, resource), snap in self._rate_limits.items():
+                if tfp not in (token_fp, "unknown"):
+                    continue
+
+                key = f"{tfp}:{resource}"
+                resources[key] = snap.as_dict()
+
+                # pick newest snapshot (by observed_at_ts)
+                if tfp == token_fp:  # prefer current token over "unknown"
+                    if latest is None or (snap.observed_at_ts or 0.0) > (latest.observed_at_ts or 0.0):
+                        latest = snap
+
+            # if no snapshot for current token, fallback to any "unknown"
+            if latest is None:
+                for (tfp, resource), snap in self._rate_limits.items():
+                    if tfp != "unknown":
+                        continue
+                    if latest is None or (snap.observed_at_ts or 0.0) > (latest.observed_at_ts or 0.0):
+                        latest = snap
+
+        return {
+            "token_fingerprint": token_fp,
+            "cached": (latest.as_dict() if latest else None),
+            "resources": resources,
+        }
+
+    def _raise_rate_limited(self, *, action: str, r: httpx.Response, elapsed_ms: int) -> None:
+        """
+        Turn GitHub RL responses into a structured RepoSenseError.
+        Handles:
+          - 429 Too Many Requests
+          - 403 with secondary rate limit / abuse detection
+        """
+        body = (r.text or "").strip()
+        body_out = body
+        if len(body_out) > 800:
+            body_out = body_out[:800] + "…"
+
+        # Attempt to parse message from GitHub JSON
+        j = _safe_json(body)
+        msg = None
+        if isinstance(j, dict):
+            msg = j.get("message") or j.get("error") or None
+        msg = msg or f"GitHub rate limit hit during {action}."
+
+        # Attach latest RL snapshot if present
+        self._update_rate_limit(r, action=action)
+        rl = self.rate_limit_status()
+
+        details: dict[str, Any] = {
+            "action": action,
+            "status_code": r.status_code,
+            "url": str(r.request.url) if r.request else None,
+            "elapsed_ms": elapsed_ms,
+            "body": body_out,
+            "rate_limit": rl,
+        }
+
+        # If Retry-After exists, surface it more directly
+        retry_after = _int(r.headers.get("retry-after"))
+        if retry_after is not None:
+            details["retry_after_s"] = retry_after
+
+        raise RepoSenseError(
+            code="rate_limited",
+            message=msg,
+            hint="Wait until reset (or Retry-After), then retry. Consider reducing call rate or enabling caching.",
+            details=details,
+        )
+
+    # ---------------------------
+    # Logging helpers
+    # ---------------------------
     def _log_http_error(
         self,
         *,
@@ -246,9 +274,6 @@ class GitHubClient:
         if len(body_out) > 800:
             body_out = body_out[:800] + "…"
 
-        # attach RL snapshot (best-effort)
-        rl = self.rate_limit_status()
-
         log.warning(
             "github_http_error",
             rid=ensure_request_id(),
@@ -262,7 +287,6 @@ class GitHubClient:
             ref=ref,
             path=path,
             body=body_out,
-            rate_limit=rl,
             **(extra or {}),
         )
 
@@ -283,8 +307,6 @@ class GitHubClient:
         if not settings.github_log_success:
             return
 
-        rl = self.rate_limit_status()
-
         log.info(
             "github_http_ok",
             rid=ensure_request_id(),
@@ -297,10 +319,12 @@ class GitHubClient:
             repo=repo,
             ref=ref,
             path=path,
-            rate_limit=rl,
             **(extra or {}),
         )
 
+    # ---------------------------
+    # API calls
+    # ---------------------------
     async def resolve_ref_to_sha(self, owner: str, repo: str, ref: str) -> str:
         """
         Resolve a branch name like 'main' to a commit SHA using Git refs.
@@ -316,12 +340,22 @@ class GitHubClient:
         r = await self._http.get(url, headers=self._headers())
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
-        # track RL no matter what
-        self._update_rate_limit_from_response(action="resolve_ref_to_sha", r=r)
+        # Update RL snapshot on every response
+        self._update_rate_limit(r, action="resolve_ref_to_sha")
+
+        # Rate-limited?
+        if r.status_code == 429:
+            self._raise_rate_limited(action="resolve_ref_to_sha", r=r, elapsed_ms=elapsed_ms)
 
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as e:
+            # Secondary rate limit often appears as 403 with "secondary rate limit" or "abuse"
+            body = r.text or ""
+            low = body.lower()
+            if r.status_code == 403 and ("secondary rate limit" in low or "abuse" in low):
+                self._raise_rate_limited(action="resolve_ref_to_sha", r=r, elapsed_ms=elapsed_ms)
+
             self._log_http_error(
                 action="resolve_ref_to_sha",
                 method="GET",
@@ -397,11 +431,19 @@ class GitHubClient:
         r = await self._http.get(url, params={"recursive": "1"}, headers=self._headers())
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
-        self._update_rate_limit_from_response(action="repo_tree", r=r)
+        self._update_rate_limit(r, action="repo_tree")
+
+        if r.status_code == 429:
+            self._raise_rate_limited(action="repo_tree", r=r, elapsed_ms=elapsed_ms)
 
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as e:
+            body = r.text or ""
+            low = body.lower()
+            if r.status_code == 403 and ("secondary rate limit" in low or "abuse" in low):
+                self._raise_rate_limited(action="repo_tree", r=r, elapsed_ms=elapsed_ms)
+
             self._log_http_error(
                 action="repo_tree",
                 method="GET",
@@ -479,11 +521,19 @@ class GitHubClient:
         r = await self._http.get(url, params={"ref": ref}, headers=self._headers())
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
-        self._update_rate_limit_from_response(action="read_file", r=r)
+        self._update_rate_limit(r, action="read_file")
+
+        if r.status_code == 429:
+            self._raise_rate_limited(action="read_file", r=r, elapsed_ms=elapsed_ms)
 
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as e:
+            body = r.text or ""
+            low = body.lower()
+            if r.status_code == 403 and ("secondary rate limit" in low or "abuse" in low):
+                self._raise_rate_limited(action="read_file", r=r, elapsed_ms=elapsed_ms)
+
             self._log_http_error(
                 action="read_file",
                 method="GET",
