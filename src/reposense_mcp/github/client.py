@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 import time
+import threading
 
 import httpx
 
@@ -22,6 +23,43 @@ class GitHubClientConfig:
     timeout_s: float = 30.0
 
 
+@dataclass
+class RateLimitState:
+    """Last observed GitHub rate limit headers."""
+    observed_at_ms: int | None = None
+
+    limit: int | None = None
+    remaining: int | None = None
+    used: int | None = None
+    reset_epoch_s: int | None = None
+
+    resource: str | None = None
+
+    # secondary / abuse signals
+    retry_after_s: int | None = None
+
+    # last request metadata (for debugging)
+    last_method: str | None = None
+    last_url: str | None = None
+    last_status: int | None = None
+    last_action: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "observed_at_ms": self.observed_at_ms,
+            "limit": self.limit,
+            "remaining": self.remaining,
+            "used": self.used,
+            "reset_epoch_s": self.reset_epoch_s,
+            "resource": self.resource,
+            "retry_after_s": self.retry_after_s,
+            "last_method": self.last_method,
+            "last_url": self.last_url,
+            "last_status": self.last_status,
+            "last_action": self.last_action,
+        }
+
+
 class GitHubClient:
     def __init__(self, cfg: Optional[GitHubClientConfig] = None, store: Optional[TokenStore] = None):
         self.cfg = cfg or GitHubClientConfig()
@@ -33,6 +71,10 @@ class GitHubClient:
             max_items = int(getattr(settings, "cache_max_items", 2048))
             self._cache = default_cache(ttl_seconds=ttl, max_items=max_items)
 
+        # Rate limit state (thread-safe)
+        self._rl_lock = threading.Lock()
+        self._rate_limit = RateLimitState()
+
         # Reuse a single AsyncClient for connection pooling.
         # IMPORTANT: we still pass per-request headers, because token can change.
         self._http = httpx.AsyncClient(timeout=self.cfg.timeout_s)
@@ -43,6 +85,11 @@ class GitHubClient:
             await self._http.aclose()
         except Exception:
             pass
+
+    def rate_limit_status(self) -> dict[str, Any]:
+        """Return last observed rate limit headers (if any)."""
+        with self._rl_lock:
+            return self._rate_limit.as_dict()
 
     def _token(self) -> str:
         token = self.store.load()
@@ -87,6 +134,99 @@ class GitHubClient:
             return
         log.info(event, rid=ensure_request_id(), **fields)
 
+    @staticmethod
+    def _h_int(headers: httpx.Headers, name: str) -> int | None:
+        v = headers.get(name)
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        try:
+            return int(v)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _h_str(headers: httpx.Headers, name: str) -> str | None:
+        v = headers.get(name)
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    def _update_rate_limit_from_response(self, *, action: str, r: httpx.Response) -> None:
+        """
+        Parse GitHub rate limit headers and store last observed state.
+
+        Headers:
+          - X-RateLimit-Limit
+          - X-RateLimit-Remaining
+          - X-RateLimit-Used
+          - X-RateLimit-Reset (unix epoch seconds)
+          - X-RateLimit-Resource (optional)
+          - Retry-After (secondary rate limit / abuse prevention)
+        """
+        h = r.headers
+        limit = self._h_int(h, "X-RateLimit-Limit")
+        remaining = self._h_int(h, "X-RateLimit-Remaining")
+        used = self._h_int(h, "X-RateLimit-Used")
+        reset = self._h_int(h, "X-RateLimit-Reset")
+        resource = self._h_str(h, "X-RateLimit-Resource")
+        retry_after = self._h_int(h, "Retry-After")
+
+        # If none present, still record last request metadata (useful for debugging)
+        now_ms = int(time.time() * 1000)
+
+        with self._rl_lock:
+            st = self._rate_limit
+            st.observed_at_ms = now_ms
+
+            if limit is not None:
+                st.limit = limit
+            if remaining is not None:
+                st.remaining = remaining
+            if used is not None:
+                st.used = used
+            if reset is not None:
+                st.reset_epoch_s = reset
+            if resource is not None:
+                st.resource = resource
+            if retry_after is not None:
+                st.retry_after_s = retry_after
+
+            st.last_method = r.request.method
+            st.last_url = str(r.request.url)
+            st.last_status = r.status_code
+            st.last_action = action
+
+            # snapshot after update for logging
+            remaining_now = st.remaining
+            limit_now = st.limit
+            reset_now = st.reset_epoch_s
+
+        # Logging policy (outside lock)
+        warn_threshold = int(getattr(settings, "github_rate_limit_warn_remaining", 50))
+        should_warn = remaining_now is not None and remaining_now <= warn_threshold
+        should_log = bool(getattr(settings, "github_rate_limit_log", False))
+
+        if should_log or should_warn:
+            level_fn = log.warning if should_warn else log.info
+            level_fn(
+                "github_rate_limit",
+                rid=ensure_request_id(),
+                action=action,
+                method=r.request.method,
+                url=str(r.request.url),
+                status_code=r.status_code,
+                limit=limit_now,
+                remaining=remaining_now,
+                used=used,
+                reset_epoch_s=reset_now,
+                resource=resource,
+                retry_after_s=retry_after,
+            )
+
     def _log_http_error(
         self,
         *,
@@ -106,6 +246,9 @@ class GitHubClient:
         if len(body_out) > 800:
             body_out = body_out[:800] + "…"
 
+        # attach RL snapshot (best-effort)
+        rl = self.rate_limit_status()
+
         log.warning(
             "github_http_error",
             rid=ensure_request_id(),
@@ -119,6 +262,7 @@ class GitHubClient:
             ref=ref,
             path=path,
             body=body_out,
+            rate_limit=rl,
             **(extra or {}),
         )
 
@@ -139,6 +283,8 @@ class GitHubClient:
         if not settings.github_log_success:
             return
 
+        rl = self.rate_limit_status()
+
         log.info(
             "github_http_ok",
             rid=ensure_request_id(),
@@ -151,6 +297,7 @@ class GitHubClient:
             repo=repo,
             ref=ref,
             path=path,
+            rate_limit=rl,
             **(extra or {}),
         )
 
@@ -168,6 +315,9 @@ class GitHubClient:
         start = time.perf_counter()
         r = await self._http.get(url, headers=self._headers())
         elapsed_ms = int((time.perf_counter() - start) * 1000)
+
+        # track RL no matter what
+        self._update_rate_limit_from_response(action="resolve_ref_to_sha", r=r)
 
         try:
             r.raise_for_status()
@@ -200,7 +350,6 @@ class GitHubClient:
         )
 
         j = r.json()
-
         sha = j.get("object", {}).get("sha")
         if not sha:
             log.warning(
@@ -221,16 +370,34 @@ class GitHubClient:
         cache_key = make_key("github", "repo_tree", owner, repo, ref, sha, "recursive=1")
         cached = self._cache_get(cache_key)
         if cached is not None:
-            self._cache_log("github_cache_hit", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref, sha=sha)
+            self._cache_log(
+                "github_cache_hit",
+                action="repo_tree",
+                key=cache_key,
+                owner=owner,
+                repo=repo,
+                ref=ref,
+                sha=sha,
+            )
             return cached
 
-        self._cache_log("github_cache_miss", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref, sha=sha)
+        self._cache_log(
+            "github_cache_miss",
+            action="repo_tree",
+            key=cache_key,
+            owner=owner,
+            repo=repo,
+            ref=ref,
+            sha=sha,
+        )
 
         url = f"{self.cfg.api_base}/repos/{owner}/{repo}/git/trees/{sha}"
 
         start = time.perf_counter()
         r = await self._http.get(url, params={"recursive": "1"}, headers=self._headers())
         elapsed_ms = int((time.perf_counter() - start) * 1000)
+
+        self._update_rate_limit_from_response(action="repo_tree", r=r)
 
         try:
             r.raise_for_status()
@@ -268,7 +435,16 @@ class GitHubClient:
 
         ttl_used = self._ttl_for_ref(ref)
         self._cache_set(cache_key, data, ttl_seconds=ttl_used)
-        self._cache_log("github_cache_set", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref, sha=sha, ttl_seconds=ttl_used)
+        self._cache_log(
+            "github_cache_set",
+            action="repo_tree",
+            key=cache_key,
+            owner=owner,
+            repo=repo,
+            ref=ref,
+            sha=sha,
+            ttl_seconds=ttl_used,
+        )
         return data
 
     async def read_file(self, owner: str, repo: str, path: str, ref: str) -> Dict[str, Any]:
@@ -276,16 +452,34 @@ class GitHubClient:
         cache_key = make_key("github", "read_file", owner, repo, ref, path)
         cached = self._cache_get(cache_key)
         if cached is not None:
-            self._cache_log("github_cache_hit", action="read_file", key=cache_key, owner=owner, repo=repo, ref=ref, path=path)
+            self._cache_log(
+                "github_cache_hit",
+                action="read_file",
+                key=cache_key,
+                owner=owner,
+                repo=repo,
+                ref=ref,
+                path=path,
+            )
             return cached
 
-        self._cache_log("github_cache_miss", action="read_file", key=cache_key, owner=owner, repo=repo, ref=ref, path=path)
+        self._cache_log(
+            "github_cache_miss",
+            action="read_file",
+            key=cache_key,
+            owner=owner,
+            repo=repo,
+            ref=ref,
+            path=path,
+        )
 
         url = f"{self.cfg.api_base}/repos/{owner}/{repo}/contents/{path}"
 
         start = time.perf_counter()
         r = await self._http.get(url, params={"ref": ref}, headers=self._headers())
         elapsed_ms = int((time.perf_counter() - start) * 1000)
+
+        self._update_rate_limit_from_response(action="read_file", r=r)
 
         try:
             r.raise_for_status()
@@ -323,5 +517,14 @@ class GitHubClient:
 
         ttl_used = self._ttl_for_ref(ref)
         self._cache_set(cache_key, data, ttl_seconds=ttl_used)
-        self._cache_log("github_cache_set", action="read_file", key=cache_key, owner=owner, repo=repo, ref=ref, path=path, ttl_seconds=ttl_used)
+        self._cache_log(
+            "github_cache_set",
+            action="read_file",
+            key=cache_key,
+            owner=owner,
+            repo=repo,
+            ref=ref,
+            path=path,
+            ttl_seconds=ttl_used,
+        )
         return data
