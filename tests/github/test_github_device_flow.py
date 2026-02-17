@@ -50,6 +50,7 @@ async def test_github_auth_poll_pending_then_authorized(mcp_client, monkeypatch,
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("GITHUB_APP_CLIENT_ID", "client_id_123")
     monkeypatch.setenv("GITHUB_APP_CLIENT_SECRET", "secret_456")
+    monkeypatch.setenv("REPOSENSE_EXPOSE_TOKENS", "1")
 
     # First poll: pending
     respx.post("https://github.com/login/oauth/access_token").mock(

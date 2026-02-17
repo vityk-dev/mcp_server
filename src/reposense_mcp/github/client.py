@@ -1,10 +1,8 @@
-# src/reposense_mcp/github/client.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 import time
-import threading
 import hashlib
 import json
 
@@ -16,7 +14,7 @@ from reposense_mcp.mcp.context import ensure_request_id
 from reposense_mcp.config import settings
 from reposense_mcp.cache import default_cache, make_key
 from reposense_mcp.errors import RepoSenseError
-from reposense_mcp.github.rate_limit import RateLimitSnapshot, parse_rate_limit_headers
+from reposense_mcp.github.rate_limit import RateLimitSnapshot, RateLimitTracker, default_rate_limit_tracker
 
 log = get_logger("reposense_mcp.github")
 
@@ -35,13 +33,32 @@ def _safe_json(text: str) -> dict[str, Any] | None:
 
 
 def _token_fingerprint(token: str) -> str:
-    # Do NOT log/store raw tokens. Fingerprint allows distinguishing sessions safely.
     h = hashlib.sha256(token.encode("utf-8")).hexdigest()
     return h[:12]
 
 
+def _int(v: str | None) -> int | None:
+    if v is None:
+        return None
+    try:
+        return int(v.strip())
+    except Exception:
+        return None
+
+
 class GitHubClient:
-    def __init__(self, cfg: Optional[GitHubClientConfig] = None, store: Optional[TokenStore] = None):
+    """
+    - Reuses one httpx.AsyncClient for pooling.
+    - Optional TTL cache.
+    - Tracks GitHub rate-limit snapshots from response headers via shared RateLimitTracker.
+    """
+
+    def __init__(
+        self,
+        cfg: Optional[GitHubClientConfig] = None,
+        store: Optional[TokenStore] = None,
+        rate_limit_tracker: RateLimitTracker | None = None,
+    ):
         self.cfg = cfg or GitHubClientConfig()
         self.store = store or TokenStore()
 
@@ -51,20 +68,12 @@ class GitHubClient:
             max_items = int(getattr(settings, "cache_max_items", 2048))
             self._cache = default_cache(ttl_seconds=ttl, max_items=max_items)
 
-        # Reuse a single AsyncClient for connection pooling.
-        # IMPORTANT: we still pass per-request headers, because token can change.
         self._http = httpx.AsyncClient(timeout=self.cfg.timeout_s)
 
-        # ---- Rate limit tracking (process-local per client instance) ----
-        self._rl_lock = threading.Lock()
-        # keyed by (token_fp, resource|unknown)
-        self._rate_limits: dict[tuple[str, str], RateLimitSnapshot] = {}
-
-        # You can optionally tune this in Settings later; default is "only log when enabled".
-        self._rl_log_enabled = getattr(settings, "github_log_success", False) or getattr(settings, "cache_log_events", False)
+        # IMPORTANT: this must be a real singleton/shared tracker to satisfy option A across clients
+        self._rl = rate_limit_tracker or default_rate_limit_tracker()
 
     async def aclose(self) -> None:
-        """Close underlying HTTP resources."""
         try:
             await self._http.aclose()
         except Exception:
@@ -103,7 +112,6 @@ class GitHubClient:
         self._cache.set(key, value, ttl_seconds=ttl_seconds)
 
     def _ttl_for_ref(self, ref: str) -> float:
-        """Use a shorter TTL for moving refs (branches/tags) and a longer TTL for immutable SHAs."""
         if self._looks_like_sha(ref):
             return float(getattr(settings, "cache_ttl_seconds", 300.0))
         return float(getattr(settings, "cache_branch_ttl_seconds", 30.0))
@@ -116,43 +124,57 @@ class GitHubClient:
     # ---------------------------
     # Rate limit tracking
     # ---------------------------
-    def _update_rate_limit(self, r: httpx.Response, *, action: str) -> None:
-        snap = parse_rate_limit_headers(
-            r.headers,
+    def _current_token_fp(self) -> str:
+        try:
+            return _token_fingerprint(self._token())
+        except Exception:
+            return "unknown"
+
+    def _update_rate_limit(self, r: httpx.Response, *, action: str) -> RateLimitSnapshot | None:
+        try:
+            url = str(r.request.url) if r.request else None
+        except Exception:
+            url = None
+
+        snap = self._rl.update(
+            token_fingerprint=self._current_token_fp(),
+            headers=r.headers,
             status_code=r.status_code,
-            url=str(r.request.url) if r.request else None,
+            url=url,
             action=action,
         )
         if not snap:
-            return
+            return None
 
-        try:
-            token_fp = _token_fingerprint(self._token())
-        except Exception:
-            # If token isn't available, keep a generic bucket.
-            token_fp = "unknown"
-
-        resource = snap.resource or "unknown"
-        key = (token_fp, resource)
-
-        with self._rl_lock:
-            prev = self._rate_limits.get(key)
-            self._rate_limits[key] = snap
-
-        # Optional logging (production-friendly; doesn’t spam unless enabled)
-        # You can adjust policy later; this is a sane default.
-        if getattr(settings, "github_log_success", False):
-            # log only when remaining is low or request was a rate-limit response
+        # Logging policy:
+        # - if github_rate_limit_log: log every snapshot
+        # - else: warn only when low remaining or rate-limited signals
+        if getattr(settings, "github_rate_limit_log", False):
+            log.info(
+                "github_rate_limit_snapshot",
+                rid=ensure_request_id(),
+                resource=snap.resource or "unknown",
+                limit=snap.limit,
+                remaining=snap.remaining,
+                used=snap.used,
+                reset_epoch_s=snap.reset_epoch_s,
+                seconds_until_reset=snap.seconds_until_reset(),
+                retry_after_s=snap.retry_after_s,
+                status_code=r.status_code,
+                action=action,
+            )
+        else:
+            thr = int(getattr(settings, "github_rate_limit_warn_remaining", 50))
             remaining = snap.remaining
-            low = (remaining is not None and remaining <= 20)
+            low = (remaining is not None and remaining <= thr)
             limited = r.status_code in (429, 403) and (snap.retry_after_s is not None or (snap.remaining == 0))
             if low or limited:
                 log.warning(
                     "github_rate_limit_observed",
                     rid=ensure_request_id(),
-                    resource=resource,
+                    resource=snap.resource or "unknown",
                     limit=snap.limit,
-                    remaining=remaining,
+                    remaining=snap.remaining,
                     used=snap.used,
                     reset_epoch_s=snap.reset_epoch_s,
                     seconds_until_reset=snap.seconds_until_reset(),
@@ -161,73 +183,21 @@ class GitHubClient:
                     action=action,
                 )
 
+        return snap
+
     def rate_limit_status(self) -> Dict[str, Any]:
-        """
-        Returns latest observed RL snapshots.
-
-        Backward-compatible shape:
-          - data["cached"] -> latest snapshot for the current token (any resource), or None
-
-        Rich shape:
-          - data["token_fingerprint"]
-          - data["resources"] -> mapping "<token_fp>:<resource>" -> snapshot dict
-        """
-        try:
-            token_fp = _token_fingerprint(self._token())
-        except Exception:
-            token_fp = "unknown"
-
-        resources: dict[str, Any] = {}
-        latest: RateLimitSnapshot | None = None
-
-        with self._rl_lock:
-            # include token_fp + unknown (useful before auth)
-            for (tfp, resource), snap in self._rate_limits.items():
-                if tfp not in (token_fp, "unknown"):
-                    continue
-
-                key = f"{tfp}:{resource}"
-                resources[key] = snap.as_dict()
-
-                # pick newest snapshot (by observed_at_ts)
-                if tfp == token_fp:  # prefer current token over "unknown"
-                    if latest is None or (snap.observed_at_ts or 0.0) > (latest.observed_at_ts or 0.0):
-                        latest = snap
-
-            # if no snapshot for current token, fallback to any "unknown"
-            if latest is None:
-                for (tfp, resource), snap in self._rate_limits.items():
-                    if tfp != "unknown":
-                        continue
-                    if latest is None or (snap.observed_at_ts or 0.0) > (latest.observed_at_ts or 0.0):
-                        latest = snap
-
-        return {
-            "token_fingerprint": token_fp,
-            "cached": (latest.as_dict() if latest else None),
-            "resources": resources,
-        }
+        return self._rl.status(token_fingerprint=self._current_token_fp())
 
     def _raise_rate_limited(self, *, action: str, r: httpx.Response, elapsed_ms: int) -> None:
-        """
-        Turn GitHub RL responses into a structured RepoSenseError.
-        Handles:
-          - 429 Too Many Requests
-          - 403 with secondary rate limit / abuse detection
-        """
         body = (r.text or "").strip()
-        body_out = body
-        if len(body_out) > 800:
-            body_out = body_out[:800] + "…"
+        body_out = body[:800] + "…" if len(body) > 800 else body
 
-        # Attempt to parse message from GitHub JSON
         j = _safe_json(body)
         msg = None
         if isinstance(j, dict):
             msg = j.get("message") or j.get("error") or None
         msg = msg or f"GitHub rate limit hit during {action}."
 
-        # Attach latest RL snapshot if present
         self._update_rate_limit(r, action=action)
         rl = self.rate_limit_status()
 
@@ -240,7 +210,6 @@ class GitHubClient:
             "rate_limit": rl,
         }
 
-        # If Retry-After exists, surface it more directly
         retry_after = _int(r.headers.get("retry-after"))
         if retry_after is not None:
             details["retry_after_s"] = retry_after
@@ -326,10 +295,6 @@ class GitHubClient:
     # API calls
     # ---------------------------
     async def resolve_ref_to_sha(self, owner: str, repo: str, ref: str) -> str:
-        """
-        Resolve a branch name like 'main' to a commit SHA using Git refs.
-        IMPORTANT: We do NOT cache this, to avoid cross-test pollution and because refs can move.
-        """
         ref = ref.strip()
         if self._looks_like_sha(ref):
             return ref
@@ -340,17 +305,14 @@ class GitHubClient:
         r = await self._http.get(url, headers=self._headers())
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
-        # Update RL snapshot on every response
         self._update_rate_limit(r, action="resolve_ref_to_sha")
 
-        # Rate-limited?
         if r.status_code == 429:
             self._raise_rate_limited(action="resolve_ref_to_sha", r=r, elapsed_ms=elapsed_ms)
 
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as e:
-            # Secondary rate limit often appears as 403 with "secondary rate limit" or "abuse"
             body = r.text or ""
             low = body.lower()
             if r.status_code == 403 and ("secondary rate limit" in low or "abuse" in low):
@@ -404,26 +366,10 @@ class GitHubClient:
         cache_key = make_key("github", "repo_tree", owner, repo, ref, sha, "recursive=1")
         cached = self._cache_get(cache_key)
         if cached is not None:
-            self._cache_log(
-                "github_cache_hit",
-                action="repo_tree",
-                key=cache_key,
-                owner=owner,
-                repo=repo,
-                ref=ref,
-                sha=sha,
-            )
+            self._cache_log("github_cache_hit", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref, sha=sha)
             return cached
 
-        self._cache_log(
-            "github_cache_miss",
-            action="repo_tree",
-            key=cache_key,
-            owner=owner,
-            repo=repo,
-            ref=ref,
-            sha=sha,
-        )
+        self._cache_log("github_cache_miss", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref, sha=sha)
 
         url = f"{self.cfg.api_base}/repos/{owner}/{repo}/git/trees/{sha}"
 
@@ -474,19 +420,9 @@ class GitHubClient:
         )
 
         data = r.json()
-
         ttl_used = self._ttl_for_ref(ref)
         self._cache_set(cache_key, data, ttl_seconds=ttl_used)
-        self._cache_log(
-            "github_cache_set",
-            action="repo_tree",
-            key=cache_key,
-            owner=owner,
-            repo=repo,
-            ref=ref,
-            sha=sha,
-            ttl_seconds=ttl_used,
-        )
+        self._cache_log("github_cache_set", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref, sha=sha, ttl_seconds=ttl_used)
         return data
 
     async def read_file(self, owner: str, repo: str, path: str, ref: str) -> Dict[str, Any]:
@@ -494,26 +430,10 @@ class GitHubClient:
         cache_key = make_key("github", "read_file", owner, repo, ref, path)
         cached = self._cache_get(cache_key)
         if cached is not None:
-            self._cache_log(
-                "github_cache_hit",
-                action="read_file",
-                key=cache_key,
-                owner=owner,
-                repo=repo,
-                ref=ref,
-                path=path,
-            )
+            self._cache_log("github_cache_hit", action="read_file", key=cache_key, owner=owner, repo=repo, ref=ref, path=path)
             return cached
 
-        self._cache_log(
-            "github_cache_miss",
-            action="read_file",
-            key=cache_key,
-            owner=owner,
-            repo=repo,
-            ref=ref,
-            path=path,
-        )
+        self._cache_log("github_cache_miss", action="read_file", key=cache_key, owner=owner, repo=repo, ref=ref, path=path)
 
         url = f"{self.cfg.api_base}/repos/{owner}/{repo}/contents/{path}"
 
@@ -564,17 +484,7 @@ class GitHubClient:
         )
 
         data = r.json()
-
         ttl_used = self._ttl_for_ref(ref)
         self._cache_set(cache_key, data, ttl_seconds=ttl_used)
-        self._cache_log(
-            "github_cache_set",
-            action="read_file",
-            key=cache_key,
-            owner=owner,
-            repo=repo,
-            ref=ref,
-            path=path,
-            ttl_seconds=ttl_used,
-        )
+        self._cache_log("github_cache_set", action="read_file", key=cache_key, owner=owner, repo=repo, ref=ref, path=path, ttl_seconds=ttl_used)
         return data
