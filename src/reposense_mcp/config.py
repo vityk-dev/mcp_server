@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     cache_enabled: bool = True
     cache_ttl_seconds: float = 300.0          # default TTL for “stable” keys (like SHA refs)
     cache_branch_ttl_seconds: float = 30.0    # SHORT TTL when ref is a moving branch/tag like "main"
-    cache_max_items: int = 2048        
+    cache_max_items: int = 2048       
     # keep in sync with TTLCache default
 
     # GitHub OAuth/device flow

@@ -92,6 +92,7 @@ class TTLCache:
     def clear(self) -> None:
         with self._lock:
             self._items.clear()
+            self._stats = CacheStats()
 
     def stats(self) -> Dict[str, Any]:
         now = self._now()

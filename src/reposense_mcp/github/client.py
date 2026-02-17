@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 import time
 
 import httpx
+import hashlib
 
 from reposense_mcp.github.token_store import TokenStore
 from reposense_mcp.logging_config import get_logger
@@ -65,9 +66,9 @@ class GitHubClient:
             return
         # TTLCache supports per-entry ttl override via ttl_seconds
         self._cache.set(key, value, ttl_seconds=ttl_seconds)
-    
+
     def _ttl_for_ref(self, ref: str) -> float:
-        """Use a shorter TTL for moving refs (branches/tags) and longer for immutable SHAs."""
+        """Use a shorter TTL for moving refs (branches/tags) and a longer TTL for immutable SHAs."""
         if self._looks_like_sha(ref):
             return float(getattr(settings, "cache_ttl_seconds", 300.0))
         return float(getattr(settings, "cache_branch_ttl_seconds", 30.0))
@@ -75,7 +76,14 @@ class GitHubClient:
     def _cache_log(self, event: str, **fields: Any) -> None:
         if not getattr(settings, "cache_log_events", False):
             return
+        if "key" in fields and isinstance(fields["key"], str):
+            fields["key"] = self._log_key(fields["key"])
         log.info(event, rid=ensure_request_id(), **fields)
+            
+    def _log_key(self, key: str) -> str:
+        if getattr(settings, "cache_log_keys", False):
+            return key
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
 
     def _log_http_error(
         self,
@@ -210,13 +218,29 @@ class GitHubClient:
     async def repo_tree(self, owner: str, repo: str, ref: str) -> Dict[str, Any]:
         sha = await self.resolve_ref_to_sha(owner=owner, repo=repo, ref=ref)
 
-        cache_key = make_key("github", "repo_tree", owner, repo, ref, sha, "recursive=1")
+        cache_key = make_key("github", "repo_tree", owner, repo, sha, "recursive=1")
         cached = self._cache_get(cache_key)
         if cached is not None:
-            self._cache_log("github_cache_hit", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref, sha=sha)
+            self._cache_log(
+                "github_cache_hit",
+                action="repo_tree",
+                key=cache_key,
+                owner=owner,
+                repo=repo,
+                ref=ref,
+                sha=sha,
+            )
             return cached
 
-        self._cache_log("github_cache_miss", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref, sha=sha)
+        self._cache_log(
+            "github_cache_miss",
+            action="repo_tree",
+            key=cache_key,
+            owner=owner,
+            repo=repo,
+            ref=ref,
+            sha=sha,
+        )
         url = f"{self.cfg.api_base}/repos/{owner}/{repo}/git/trees/{sha}"
 
         start = time.perf_counter()
@@ -339,7 +363,6 @@ class GitHubClient:
             )
 
             data = r.json()
-
 
         ttl_used = self._ttl_for_ref(ref)
         self._cache_set(cache_key, data, ttl_seconds=ttl_used)
