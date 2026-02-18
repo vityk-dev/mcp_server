@@ -1,3 +1,4 @@
+# src/reposense_mcp/github/client.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from reposense_mcp.github.token_store import TokenStore
 from reposense_mcp.logging_config import get_logger
 from reposense_mcp.mcp.context import ensure_request_id
 from reposense_mcp.config import settings
-from reposense_mcp.cache import default_cache, make_key
+from reposense_mcp.cache import TTLCache, default_cache, make_key
 from reposense_mcp.errors import RepoSenseError
 from reposense_mcp.github.rate_limit import RateLimitSnapshot, RateLimitTracker, default_rate_limit_tracker
 
@@ -58,19 +59,26 @@ class GitHubClient:
         cfg: Optional[GitHubClientConfig] = None,
         store: Optional[TokenStore] = None,
         rate_limit_tracker: RateLimitTracker | None = None,
+        cache: TTLCache | None = None,  # <-- DODANE
     ):
         self.cfg = cfg or GitHubClientConfig()
         self.store = store or TokenStore()
 
-        self._cache = None
-        if getattr(settings, "cache_enabled", True):
-            ttl = float(getattr(settings, "cache_ttl_seconds", 300.0))
-            max_items = int(getattr(settings, "cache_max_items", 2048))
-            self._cache = default_cache(ttl_seconds=ttl, max_items=max_items)
+        # Cache injection:
+        # - jeśli cache przekazany -> użyj go
+        # - jeśli nie -> honoruj settings.cache_enabled i bierz singleton default_cache(...)
+        self._cache: TTLCache | None = None
+        if cache is not None:
+            self._cache = cache
+        else:
+            if getattr(settings, "cache_enabled", True):
+                ttl = float(getattr(settings, "cache_ttl_seconds", 300.0))
+                max_items = int(getattr(settings, "cache_max_items", 2048))
+                self._cache = default_cache(ttl_seconds=ttl, max_items=max_items)
 
         self._http = httpx.AsyncClient(timeout=self.cfg.timeout_s)
 
-        # IMPORTANT: this must be a real singleton/shared tracker to satisfy option A across clients
+        # IMPORTANT: shared tracker
         self._rl = rate_limit_tracker or default_rate_limit_tracker()
 
     async def aclose(self) -> None:

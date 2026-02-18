@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 from fastmcp import FastMCP
 
-from reposense_mcp.cache import default_cache
+from reposense_mcp.cache import default_cache, TTLCache
 from reposense_mcp.config import settings
 from reposense_mcp.errors import RepoSenseError
 from reposense_mcp.github.auth_device import GitHubDeviceAuth
@@ -23,16 +23,18 @@ from reposense_mcp.security.policy import RepoPolicy
 
 log = get_logger("reposense_mcp.tools")
 
+
 mcp = FastMCP("RepoSense MCP")
 
-
 # -------------------------
-# Cache helpers
+# Process-wide cache (shared by all clients/tools)
 # -------------------------
-def _cache_instance():
-    ttl = float(getattr(settings, "cache_ttl_seconds", 300.0))
-    max_items = int(getattr(settings, "cache_max_items", 2048))
-    return default_cache(ttl_seconds=ttl, max_items=max_items)
+_shared_cache: TTLCache | None = None
+if getattr(settings, "cache_enabled", True):
+    _shared_cache = default_cache(
+        ttl_seconds=float(getattr(settings, "cache_ttl_seconds", 300.0)),
+        max_items=int(getattr(settings, "cache_max_items", 2048)),
+    )
 
 
 # -------------------------
@@ -50,24 +52,26 @@ _gh_rate_limit_tracker = default_rate_limit_tracker()
 def _get_github_client(*, no_cache: bool = False) -> GitHubClient:
     """Process-wide GitHub client(s).
 
-    Why:
-    - Reuse underlying httpx AsyncClient connection pool
-    - Avoid per-request client construction overhead
-
-    We keep two instances:
-    - cached: normal behavior
-    - nocache: identical but with cache disabled
+    cached: normal behavior (can use cache)
+    nocache: hard cache-off regardless of GitHubClient internal defaults
     """
     global _gh_cached, _gh_nocache
     with _gh_lock:
         if _gh_cached is None:
             _gh_cached = GitHubClient(rate_limit_tracker=_gh_rate_limit_tracker)
+            # Attach the process-wide cache so that cache tools and GitHub tools
+            # observe the same cache instance.
+            try:
+                setattr(_gh_cached, "_cache", _shared_cache)
+            except Exception:
+                pass
 
         if _gh_nocache is None:
             _gh_nocache = GitHubClient(rate_limit_tracker=_gh_rate_limit_tracker)
-            # Disable cache permanently for this instance.
+            # HARD GUARANTEE: no_cache client never uses cache,
+            # even if GitHubClient enables it from settings.
             try:
-                _gh_nocache._cache = None  # type: ignore[attr-defined]
+                setattr(_gh_nocache, "_cache", None)
             except Exception:
                 pass
 
@@ -182,8 +186,53 @@ def ping(message: Optional[str] = None) -> Dict[str, Any]:
 def github_cache_stats() -> Dict[str, Any]:
     start = time.perf_counter()
     try:
-        cache = _cache_instance()
-        out = ok(cache.stats())
+        ttl = float(getattr(settings, "cache_ttl_seconds", 300.0))
+        max_items = int(getattr(settings, "cache_max_items", 2048))
+
+        if _shared_cache is None:
+            out = ok(
+                {
+                    "ttl_seconds": ttl,
+                    "max_items": max_items,
+                    "size": 0,
+                    "counters": {
+                        "hits": 0,
+                        "misses": 0,
+                        "sets": 0,
+                        "evictions": 0,
+                        "expired": 0,
+                        "capacity_evictions": 0,
+                    },
+                }
+            )
+        else:
+            raw = _shared_cache.stats()
+
+            # Some cache implementations return `{enabled: bool, stats: {...}}`.
+            # Tests/tools expect the flat stats shape.
+            stats = raw.get("stats") if isinstance(raw, dict) else None
+            if isinstance(stats, dict):
+                data = stats
+            elif isinstance(raw, dict):
+                data = raw
+            else:
+                data = {}
+
+            out = ok(
+                {
+                    "ttl_seconds": float(data.get("ttl_seconds", ttl)),
+                    "max_items": int(data.get("max_items", max_items)),
+                    "size": int(data.get("size", 0)),
+                    "counters": {
+                        "hits": int((data.get("counters") or {}).get("hits", 0)),
+                        "misses": int((data.get("counters") or {}).get("misses", 0)),
+                        "sets": int((data.get("counters") or {}).get("sets", 0)),
+                        "evictions": int((data.get("counters") or {}).get("evictions", 0)),
+                        "expired": int((data.get("counters") or {}).get("expired", 0)),
+                        "capacity_evictions": int((data.get("counters") or {}).get("capacity_evictions", 0)),
+                    },
+                }
+            )
     except Exception as e:
         out = err(e)
     _log_tool("github_cache_stats", start, out)
@@ -194,14 +243,15 @@ def github_cache_stats() -> Dict[str, Any]:
 def github_cache_clear() -> Dict[str, Any]:
     start = time.perf_counter()
     try:
-        cache = _cache_instance()
-        cache.clear()
-        out = ok({"cleared": True})
+        if _shared_cache is None:
+            out = ok({"enabled": False, "cleared": False})
+        else:
+            _shared_cache.clear()
+            out = ok({"enabled": True, "cleared": True})
     except Exception as e:
         out = err(e)
     _log_tool("github_cache_clear", start, out)
     return out
-
 
 @mcp.tool
 async def github_auth_start() -> Dict[str, Any]:
@@ -377,6 +427,7 @@ async def github_read_file(
         out = err(e)
 
     _log_tool("github_read_file", start, out, owner=owner, repo=repo, ref=ref, path=path, no_cache=no_cache)
+    
     return out
 
 @mcp.tool
@@ -560,7 +611,8 @@ def github_auth_logout() -> Dict[str, Any]:
         auth = GitHubDeviceAuth(load_github_oauth_config())
         logout_result = auth.logout()
 
-        _cache_instance().clear()
+        if _shared_cache is not None:
+            _shared_cache.clear()
         _try_schedule_aclose()
 
         out = ok({**logout_result, "cache_cleared": True, "clients_closing": True})
