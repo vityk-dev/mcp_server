@@ -19,11 +19,13 @@ from reposense_mcp.github.rate_limit import default_rate_limit_tracker
 from reposense_mcp.logging_config import get_logger, new_request_id
 from reposense_mcp.mcp.context import get_request_id, set_request_id
 from reposense_mcp.mcp.response import err, ok
+from reposense_mcp.prompts import register_prompts
 from reposense_mcp.security.policy import RepoPolicy
 
 log = get_logger("reposense_mcp.tools")
 
 mcp = FastMCP("RepoSense MCP")
+register_prompts(mcp)
 
 
 # -------------------------
