@@ -408,8 +408,48 @@ async def github_search_code(
         out,
         no_cache=no_cache,
         repo=repo,
+        query=query, 
         language=language,
         path=path,
+        max_results=max_results,
+    )
+    return out
+
+@mcp.tool
+async def github_search_repos(
+    query: str,
+    language: str | None = None,
+    stars: str | None = None,
+    topics: list[str] | None = None,
+    sort: str = "stars",
+    max_results: int = 10,
+    no_cache: bool = False,
+) -> dict:
+    start = time.perf_counter()
+    try:
+        gh = _get_github_client(no_cache=no_cache)
+        data = await gh.search_repos(
+            query=query,
+            language=language,
+            stars=stars,
+            topics=topics,
+            sort=sort,
+            max_results=max_results,
+        )
+        out = ok(data)
+    except Exception as e:
+        out = err(e)
+
+    _log_tool(
+        "github_search_repos",
+        start,
+        out,
+        no_cache=no_cache,
+        language=language,
+        stars=stars,
+        query=query, 
+        topics=topics,
+        sort=sort,
         max_results=max_results,
     )
     return out

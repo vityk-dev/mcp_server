@@ -593,3 +593,122 @@ class GitHubClient:
             "incomplete_results": bool(data.get("incomplete_results") or False),
             "items": out_items,
         }
+    async def search_repos(
+        self,
+        *,
+        query: str,
+        language: str | None = None,
+        stars: str | None = None,
+        topics: list[str] | None = None,
+        sort: str = "stars",
+        max_results: int = 10,
+    ) -> Dict[str, Any]:
+        allowed_sort = {"stars", "forks", "updated"}
+        if sort not in allowed_sort:
+            raise RepoSenseError(
+                code="bad_request",
+                message="Invalid sort value.",
+                hint="Use one of: stars, forks, updated",
+                details={"sort": sort, "allowed": sorted(allowed_sort)},
+            )
+
+        q = (query or "").strip()
+        if not q:
+            raise RepoSenseError(
+                code="bad_request",
+                message="Query cannot be empty.",
+                hint="Provide query like 'machine learning' or 'http client'.",
+                details={},
+            )
+
+        max_results = int(max_results)
+        if max_results <= 0:
+            max_results = 10
+        if max_results > 100:
+            max_results = 100
+
+        q_parts = [q]
+        if language:
+            q_parts.append(f"language:{language.strip()}")
+        if stars:
+            q_parts.append(f"stars:{stars.strip()}")
+        if topics:
+            for t in topics:
+                t = str(t).strip()
+                if t:
+                    q_parts.append(f"topic:{t}")
+
+        search_query = " ".join(q_parts).strip()
+        url = f"{self.cfg.api_base}/search/repositories"
+
+        start = time.perf_counter()
+        r = await self._http.get(
+            url,
+            params={
+                "q": search_query,
+                "per_page": max_results,
+                "sort": sort,
+                "order": "desc",
+            },
+            headers=self._headers(),
+        )
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+
+        self._update_rate_limit(r, action="search_repos")
+
+        if r.status_code == 429:
+            self._raise_rate_limited(action="search_repos", r=r, elapsed_ms=elapsed_ms)
+
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            body = r.text or ""
+            low = body.lower()
+            if r.status_code == 403 and ("secondary rate limit" in low or "abuse" in low):
+                self._raise_rate_limited(action="search_repos", r=r, elapsed_ms=elapsed_ms)
+
+            self._log_http_error(
+                action="search_repos",
+                method="GET",
+                url=str(r.request.url),
+                status_code=r.status_code,
+                body=r.text,
+                elapsed_ms=elapsed_ms,
+                extra={"query": search_query},
+            )
+            raise RuntimeError(f"Failed to search repositories. HTTP {r.status_code}: {r.text}") from e
+
+        self._log_http_ok(
+            action="search_repos",
+            method="GET",
+            url=str(r.request.url),
+            status_code=r.status_code,
+            elapsed_ms=elapsed_ms,
+            extra={"query": search_query},
+        )
+
+        data = r.json() or {}
+        items = data.get("items") or []
+
+        out_items: list[dict[str, Any]] = []
+        for it in items[:max_results]:
+            out_items.append(
+                {
+                    "full_name": it.get("full_name"),
+                    "description": it.get("description") or "",
+                    "language": it.get("language"),
+                    "stars": it.get("stargazers_count"),
+                    "forks": it.get("forks_count"),
+                    "html_url": it.get("html_url"),
+                    "topics": it.get("topics") or [],
+                    "updated_at": it.get("updated_at"),
+                    "score": it.get("score", 0),
+                }
+            )
+
+        return {
+            "query": search_query,
+            "total_count": int(data.get("total_count") or 0),
+            "incomplete_results": bool(data.get("incomplete_results") or False),
+            "items": out_items,
+        }
