@@ -1,23 +1,18 @@
-# src/reposense_mcp/app.py
 from __future__ import annotations
 
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
+from reposense_mcp.config import settings
 from reposense_mcp.logging_config import configure_logging, get_logger, new_request_id
 from reposense_mcp.mcp.context import clear_request_id, set_request_id
 from reposense_mcp.server import aclose_github_clients, mcp
 
 
 def create_api() -> FastAPI:
-    """
-    Create a new FastAPI app instance.
-
-    Important: This must build a *fresh* FastMCP HTTP app each time so the
-    StreamableHTTPSessionManager is not reused across lifespans (tests).
-    """
     configure_logging()
     log = get_logger("reposense_mcp.app")
 
@@ -25,20 +20,27 @@ def create_api() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Delegate startup/shutdown to FastMCP, and then do our own cleanup.
         async with mcp_app.lifespan(app):
             yield
-        # After FastMCP shutdown completes, close shared HTTP clients.
         await aclose_github_clients()
 
     api = FastAPI(title="RepoSense MCP", version="0.1.0", lifespan=lifespan)
 
     @api.middleware("http")
-    async def log_requests(request, call_next):
+    async def require_api_key(request: Request, call_next):
+        if request.url.path.startswith("/mcp"):
+            expected = (settings.api_key or "").strip()
+            if expected:
+                auth = (request.headers.get("authorization") or "").strip()
+                if auth != f"Bearer {expected}":
+                    return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+        return await call_next(request)
+
+    @api.middleware("http")
+    async def log_requests(request: Request, call_next):
         rid = request.headers.get("x-request-id") or new_request_id()
         set_request_id(rid)
         start = time.perf_counter()
-
         try:
             response = await call_next(request)
             elapsed_ms = int((time.perf_counter() - start) * 1000)

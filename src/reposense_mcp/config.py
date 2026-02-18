@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # SECURITY: never enable in production
+    api_key: str | None = None
     expose_tokens: bool = False
 
     # Cache
