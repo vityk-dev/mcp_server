@@ -86,10 +86,10 @@ class GitHubClient:
             raise RuntimeError("Not authorized. Run github_auth_start + github_auth_poll first.")
         return token.access_token
 
-    def _headers(self) -> Dict[str, str]:
+    def _headers(self, *, accept: str | None = None) -> Dict[str, str]:
         return {
             "Authorization": f"Bearer {self._token()}",
-            "Accept": "application/vnd.github+json",
+            "Accept": accept or "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "reposense-mcp",
         }
@@ -488,3 +488,108 @@ class GitHubClient:
         self._cache_set(cache_key, data, ttl_seconds=ttl_used)
         self._cache_log("github_cache_set", action="read_file", key=cache_key, owner=owner, repo=repo, ref=ref, path=path, ttl_seconds=ttl_used)
         return data
+
+    async def search_code(
+        self,
+        *,
+        query: str,
+        repo: str | None = None,      # "owner/repo"
+        language: str | None = None,  # "python"
+        path: str | None = None,      # "src/" albo "server.py"
+        max_results: int = 10,
+    ) -> Dict[str, Any]:
+        q = (query or "").strip()
+        if not q:
+            raise RuntimeError("query is required")
+
+        max_results = int(max_results)
+        if max_results <= 0:
+            max_results = 10
+        if max_results > 100:
+            max_results = 100
+
+        q_parts = [q]
+        if repo:
+            q_parts.append(f"repo:{repo.strip()}")
+        if language:
+            q_parts.append(f"language:{language.strip()}")
+        if path:
+            q_parts.append(f"path:{path.strip()}")
+
+        search_query = " ".join(q_parts)
+        url = f"{self.cfg.api_base}/search/code"
+
+        # Text matches require special Accept
+        headers = self._headers(
+            accept="application/vnd.github+json, application/vnd.github.text-match+json"
+        )
+
+        start = time.perf_counter()
+        r = await self._http.get(
+            url,
+            params={
+                "q": search_query,
+                "per_page": max_results,
+                "sort": "indexed",
+                "order": "desc",
+            },
+            headers=headers,
+        )
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+
+        self._update_rate_limit(r, action="search_code")
+
+        if r.status_code == 429:
+            self._raise_rate_limited(action="search_code", r=r, elapsed_ms=elapsed_ms)
+
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            body = r.text or ""
+            low = body.lower()
+            if r.status_code == 403 and ("secondary rate limit" in low or "abuse" in low):
+                self._raise_rate_limited(action="search_code", r=r, elapsed_ms=elapsed_ms)
+
+            self._log_http_error(
+                action="search_code",
+                method="GET",
+                url=str(r.request.url),
+                status_code=r.status_code,
+                body=r.text,
+                elapsed_ms=elapsed_ms,
+                extra={"query": search_query},
+            )
+            raise RuntimeError(f"Failed to search code. HTTP {r.status_code}: {r.text}") from e
+
+        self._log_http_ok(
+            action="search_code",
+            method="GET",
+            url=str(r.request.url),
+            status_code=r.status_code,
+            elapsed_ms=elapsed_ms,
+            extra={"query": search_query},
+        )
+
+        data = r.json() or {}
+        items = data.get("items") or []
+
+        out_items: list[dict[str, Any]] = []
+        for it in items[:max_results]:
+            repo_obj = it.get("repository") or {}
+            out_items.append(
+                {
+                    "repository": repo_obj.get("full_name"),
+                    "path": it.get("path"),
+                    "sha": it.get("sha"),
+                    "html_url": it.get("html_url"),
+                    "score": it.get("score"),
+                    "text_matches": it.get("text_matches") or [],
+                }
+            )
+
+        return {
+            "query": search_query,
+            "total_count": int(data.get("total_count") or 0),
+            "incomplete_results": bool(data.get("incomplete_results") or False),
+            "items": out_items,
+        }

@@ -379,6 +379,40 @@ async def github_read_file(
     _log_tool("github_read_file", start, out, owner=owner, repo=repo, ref=ref, path=path, no_cache=no_cache)
     return out
 
+@mcp.tool
+async def github_search_code(
+    query: str,
+    repo: str | None = None,
+    language: str | None = None,
+    path: str | None = None,
+    max_results: int = 10,
+    no_cache: bool = False,
+) -> dict:
+    start = time.perf_counter()
+    try:
+        gh = _get_github_client(no_cache=no_cache)
+        data = await gh.search_code(
+            query=query,
+            repo=repo,
+            language=language,
+            path=path,
+            max_results=max_results,
+        )
+        out = ok(data)
+    except Exception as e:
+        out = err(e)
+
+    _log_tool(
+        "github_search_code",
+        start,
+        out,
+        no_cache=no_cache,
+        repo=repo,
+        language=language,
+        path=path,
+        max_results=max_results,
+    )
+    return out
 
 @mcp.tool
 async def github_read_excerpt(

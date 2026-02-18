@@ -6,13 +6,6 @@ import pytest
 from fastmcp.client import Client
 from reposense_mcp.server import mcp
 
-
-@pytest.fixture
-async def mcp_client():
-    async with Client(transport=mcp) as client:
-        yield client
-
-
 @respx.mock
 async def test_github_auth_start(mcp_client, monkeypatch):
     monkeypatch.setenv("GITHUB_APP_CLIENT_ID", "client_id_123")
