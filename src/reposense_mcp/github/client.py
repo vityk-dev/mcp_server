@@ -774,7 +774,7 @@ class GitHubClient:
             "incomplete_results": bool(data.get("incomplete_results") or False),
             "items": out_items,
         }
-        
+
     async def list_branches(
         self,
         *,
@@ -841,9 +841,7 @@ class GitHubClient:
 
             data = r.json() or []
             if not isinstance(data, list):
-                raise RuntimeError(
-                    f"Unexpected branches response for {owner}/{repo}: {data}"
-                )
+                raise RuntimeError(f"Unexpected branches response for {owner}/{repo}: {data}")
 
             for b in data:
                 b = b or {}

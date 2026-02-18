@@ -714,6 +714,7 @@ def github_auth_logout() -> dict[str, Any]:
     _log_tool("github_auth_logout", start, out)
     return out
 
+
 @mcp.tool
 async def github_list_branches(
     owner: str,
