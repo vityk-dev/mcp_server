@@ -1,3 +1,4 @@
+# src/reposense_mcp/github/client.py
 from __future__ import annotations
 
 import hashlib
@@ -773,3 +774,92 @@ class GitHubClient:
             "incomplete_results": bool(data.get("incomplete_results") or False),
             "items": out_items,
         }
+        
+    async def list_branches(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        per_page: int = 100,
+        max_pages: int = 10,
+    ) -> list[dict[str, Any]]:
+        per_page = max(1, min(int(per_page), 100))
+        max_pages = max(1, min(int(max_pages), 50))
+
+        url = f"{self.cfg.api_base}/repos/{owner}/{repo}/branches"
+
+        out: list[dict[str, Any]] = []
+        page = 1
+
+        while page <= max_pages:
+            start = time.perf_counter()
+            r = await self._http.get(
+                url,
+                params={"per_page": per_page, "page": page},
+                headers=self._headers(),
+            )
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
+
+            self._update_rate_limit(r, action="list_branches")
+
+            if r.status_code == 429:
+                self._raise_rate_limited(action="list_branches", r=r, elapsed_ms=elapsed_ms)
+
+            try:
+                r.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                body = r.text or ""
+                low = body.lower()
+                if r.status_code == 403 and ("secondary rate limit" in low or "abuse" in low):
+                    self._raise_rate_limited(action="list_branches", r=r, elapsed_ms=elapsed_ms)
+
+                self._log_http_error(
+                    action="list_branches",
+                    method="GET",
+                    url=str(r.request.url),
+                    status_code=r.status_code,
+                    body=r.text,
+                    elapsed_ms=elapsed_ms,
+                    owner=owner,
+                    repo=repo,
+                    extra={"page": page, "per_page": per_page},
+                )
+                raise RuntimeError(
+                    f"Failed to list branches for {owner}/{repo}. HTTP {r.status_code}: {r.text}"
+                ) from e
+
+            self._log_http_ok(
+                action="list_branches",
+                method="GET",
+                url=str(r.request.url),
+                status_code=r.status_code,
+                elapsed_ms=elapsed_ms,
+                owner=owner,
+                repo=repo,
+                extra={"page": page, "per_page": per_page},
+            )
+
+            data = r.json() or []
+            if not isinstance(data, list):
+                raise RuntimeError(
+                    f"Unexpected branches response for {owner}/{repo}: {data}"
+                )
+
+            for b in data:
+                b = b or {}
+                commit = (b.get("commit") or {}) if isinstance(b.get("commit"), dict) else {}
+                out.append(
+                    {
+                        "name": b.get("name"),
+                        "sha": commit.get("sha"),
+                        "protected": bool(b.get("protected", False)),
+                    }
+                )
+
+            # koniec paginacji (ostatnia strona)
+            if len(data) < per_page:
+                break
+
+            page += 1
+
+        return out

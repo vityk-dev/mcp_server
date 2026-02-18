@@ -712,6 +712,50 @@ def github_auth_logout() -> dict[str, Any]:
     _log_tool("github_auth_logout", start, out)
     return out
 
+@mcp.tool
+async def github_list_branches(
+    owner: str,
+    repo: str,
+    per_page: int = 100,
+    max_pages: int = 10,
+    no_cache: bool = False,
+) -> dict:
+    start = time.perf_counter()
+    rid = _resolve_request_id()
+    try:
+        gh = _get_github_client(no_cache=no_cache)
+        branches = await gh.list_branches(
+            owner=owner,
+            repo=repo,
+            per_page=per_page,
+            max_pages=max_pages,
+        )
+        out = ok(
+            {"branches": branches, "count": len(branches)},
+            tool_name="github_list_branches",
+            rid=rid,
+            rate_limit=_best_effort_rate_limit(no_cache=no_cache),
+        )
+    except Exception as e:
+        out = err(
+            e,
+            tool_name="github_list_branches",
+            rid=rid,
+            rate_limit=_best_effort_rate_limit(no_cache=no_cache),
+        )
+
+    _log_tool(
+        "github_list_branches",
+        start,
+        out,
+        owner=owner,
+        repo=repo,
+        no_cache=no_cache,
+        per_page=per_page,
+        max_pages=max_pages,
+    )
+    return out
+
 
 @mcp.tool
 def github_rate_limit_status(no_cache: bool = False) -> dict[str, Any]:
