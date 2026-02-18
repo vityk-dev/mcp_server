@@ -16,6 +16,7 @@ from reposense_mcp.github.auth_device import GitHubDeviceAuth
 from reposense_mcp.github.client import GitHubClient
 from reposense_mcp.github.config import load_github_oauth_config
 from reposense_mcp.github.rate_limit import default_rate_limit_tracker
+from reposense_mcp.github.token_store import TokenStore
 from reposense_mcp.logging_config import get_logger, new_request_id
 from reposense_mcp.mcp.context import get_request_id, set_request_id
 from reposense_mcp.mcp.response import err, ok
@@ -46,7 +47,20 @@ _gh_nocache: GitHubClient | None = None
 
 # Shared, process-wide rate-limit tracker so that BOTH clients (cached + nocache)
 # contribute to the same observed snapshots.
+
 _gh_rate_limit_tracker = default_rate_limit_tracker()
+
+# -------------------------------------------------------------------
+# Backwards-compat test hooks
+# -------------------------------------------------------------------
+# Older tests monkeypatch `reposense_mcp.server.github_client` expecting tools
+# to use it directly. The newer implementation uses `_get_github_client()`.
+# Keep these module globals as optional overrides for test monkeypatching.
+#
+# If set (non-None), `_get_github_client()` will return these instances
+# instead of constructing/using the shared process-wide clients.
+github_client: Any | None = None
+github_client_nocache: Any | None = None
 
 
 def _get_github_client(*, no_cache: bool = False) -> GitHubClient:
@@ -62,6 +76,19 @@ def _get_github_client(*, no_cache: bool = False) -> GitHubClient:
     """
     global _gh_cached, _gh_nocache
     with _gh_lock:
+        # Test override: allow monkeypatching `reposense_mcp.server.github_client`
+        # (and optionally `github_client_nocache`) to force a specific client.
+        global github_client, github_client_nocache
+        if no_cache:
+            if github_client_nocache is not None:
+                return github_client_nocache  # type: ignore[return-value]
+            # Fallback: older tests only monkeypatch `github_client`.
+            if github_client is not None:
+                return github_client  # type: ignore[return-value]
+        else:
+            if github_client is not None:
+                return github_client  # type: ignore[return-value]
+
         if _gh_cached is None:
             _gh_cached = GitHubClient(rate_limit_tracker=_gh_rate_limit_tracker)
 
@@ -696,20 +723,43 @@ async def github_read_excerpt(
 def github_auth_logout() -> dict[str, Any]:
     start = time.perf_counter()
     rid = _resolve_request_id()
+
+    warnings: list[str] = []
+    logout_result: dict[str, Any] = {}
+
+    # Best-effort: spróbuj “pełnego” logoutu (wymaga configu),
+    # ale jeśli configu brak — nadal chcemy wyczyścić token lokalny i cache.
     try:
         auth = GitHubDeviceAuth(load_github_oauth_config())
-        logout_result = auth.logout()
-
-        _cache_instance().clear()
-        _try_schedule_aclose()
-
-        out = ok(
-            {**logout_result, "cache_cleared": True, "clients_closing": True},
-            tool_name="github_auth_logout",
-            rid=rid,
-        )
+        logout_result = auth.logout() or {}
     except Exception as e:
-        out = err(e, tool_name="github_auth_logout", rid=rid)
+        # fallback: usuń token lokalnie, bez configu
+        try:
+            TokenStore().clear()
+            logout_result = {"logged_out": True, "method": "token_store_clear"}
+        except Exception as e2:
+            logout_result = {"logged_out": False, "method": "token_store_clear_failed"}
+            warnings.append(f"logout_token_clear_failed: {e2}")
+
+        warnings.append(f"logout_auth_unavailable: {e}")
+
+    # Zawsze: wyczyść cache i zamknij klientów
+    try:
+        _cache_instance().clear()
+    except Exception as e:
+        warnings.append(f"cache_clear_failed: {e}")
+
+    try:
+        _try_schedule_aclose()
+    except Exception as e:
+        warnings.append(f"clients_close_schedule_failed: {e}")
+
+    out = ok(
+        {**logout_result, "cache_cleared": True, "clients_closing": True},
+        tool_name="github_auth_logout",
+        rid=rid,
+        warnings=warnings,
+    )
 
     _log_tool("github_auth_logout", start, out)
     return out
