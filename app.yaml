@@ -1,0 +1,89 @@
+# app.yaml
+# Azure Container Apps - full definition for reposense-mcp
+
+type: Microsoft.App/containerApps
+name: reposense-mcp
+location: Sweden Central
+
+properties:
+  environmentId: /subscriptions/a458c7d8-b4b6-40e1-a75e-66b829a65b15/resourceGroups/aca-region-check/providers/Microsoft.App/managedEnvironments/aca-check-swedencentral
+
+  configuration:
+    activeRevisionsMode: Single
+
+    ingress:
+      external: true
+      targetPort: 8000
+      allowInsecure: false
+      transport: Auto
+      traffic:
+        - latestRevision: true
+          weight: 100
+
+    registries:
+      - server: ghcr.io
+        username: vityk-dev
+        passwordSecretRef: ghcrio-vityk-dev
+
+    secrets:
+      - name: ghcrio-vityk-dev
+      - name: api-key
+      - name: github-client-id
+      - name: github-client-secret
+      - name: tokenstore-key
+
+  template:
+    containers:
+      - name: reposense-mcp
+        image: ghcr.io/vityk-dev/reposense-mcp:0.1.2
+
+        resources:
+          cpu: 0.25
+          memory: 0.5Gi
+          ephemeralStorage: 1Gi
+
+        env:
+          - name: REPOSENSE_LOG_LEVEL
+            value: WARNING
+          - name: REPOSENSE_EXPOSE_TOKENS
+            value: "false"
+
+          # Bearer auth to MCP (your middleware)
+          - name: REPOSENSE_API_KEY
+            secretRef: api-key
+
+          # GitHub OAuth/device flow (if you use it)
+          - name: REPOSENSE_GITHUB_APP_CLIENT_ID
+            secretRef: github-client-id
+          - name: REPOSENSE_GITHUB_APP_CLIENT_SECRET
+            secretRef: github-client-secret
+
+          # TokenStore path inside mounted Azure Files volume
+          - name: REPOSENSE_TOKENSTORE_PATH
+            value: /data/tokenstore.json
+
+          # optional logging toggles you had before
+          - name: REPOSENSE_CACHE_LOG_EVENTS
+            value: "false"
+          - name: REPOSENSE_CACHE_LOG_KEYS
+            value: "false"
+          - name: REPOSENSE_GITHUB_LOG_SUCCESS
+            value: "false"
+
+        volumeMounts:
+          - volumeName: tokenstore
+            mountPath: /data
+
+    scale:
+      minReplicas: 0
+      maxReplicas: 1
+      cooldownPeriod: 300
+      pollingInterval: 30
+
+    volumes:
+      - name: tokenstore
+        storageType: AzureFile
+        storageName: tokenstore
+        shareName: tokenstore
+        accessMode: ReadWrite
+        storageKeySecretRef: tokenstore-key

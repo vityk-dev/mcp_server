@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="REPOSENSE_", extra="ignore")
 
     log_level: str = "INFO"
+    tokenstore_path: str = "/data/tokenstore.json"
 
     # SECURITY: never enable in production
     api_key: str | None = None

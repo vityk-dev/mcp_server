@@ -1,0 +1,9 @@
+HTTP/2 200 
+date: Wed, 18 Feb 2026 19:06:44 GMT
+server: uvicorn
+cache-control: no-cache, no-transform
+content-type: text/event-stream
+mcp-session-id: 636780e84850407698408987328ca81d
+x-accel-buffering: no
+x-request-id: dae79239-a932-4faa-96c4-47f3819ab3b8
+

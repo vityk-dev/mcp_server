@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8" />
+<button id="go">Test MCP</button>
+<pre id="out"></pre>
+<script>
+const FQDN = "reposense-mcp.orangebay-f723dc12.swedencentral.azurecontainerapps.io";
+const API_KEY = "WKLEJ_TUTAJ_PRAWIDLOWY_API_KEY";
+
+document.getElementById("go").onclick = async () => {
+  const outEl = document.getElementById("out");
+  const log = (...a) => (outEl.textContent += a.join(" ") + "\n");
+  try {
+    const r = await fetch(`https://${FQDN}/mcp/`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${API_KEY}`,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name:"browser", version:"0.1" } }
+      }),
+    });
+    log("status:", r.status);
+    log("content-type:", r.headers.get("content-type"));
+    log("mcp-session-id:", r.headers.get("mcp-session-id"));
+    const text = await r.text();
+    log("\nbody:\n" + text.slice(0, 800));
+  } catch (e) {
+    log("fetch failed:", e);
+  }
+};
+</script>

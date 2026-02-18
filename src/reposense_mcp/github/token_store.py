@@ -18,14 +18,19 @@ class TokenData:
 
 
 class TokenStore:
-    """
-    MVP token store. Stores token JSON in a local file with 0600 permissions.
-    Later we can swap this for macOS Keychain.
-    """
-
     def __init__(self, path: Path | None = None):
-        default_path = Path.home() / ".reposense_mcp" / "github_token.json"
-        self.path = path or default_path
+        env_path = (
+            os.getenv("REPOSENSE_TOKENSTORE_PATH", "").strip()
+            or os.getenv("REPOSENSE_TOKEN_PATH", "").strip()
+            or None
+        )
+
+        if path is not None:
+            self.path = path
+        elif env_path is not None:
+            self.path = Path(env_path)
+        else:
+            self.path = Path.home() / ".reposense_mcp" / "github_token.json"
 
     def load(self) -> TokenData | None:
         if not self.path.exists():
@@ -37,11 +42,17 @@ class TokenStore:
 
     def save(self, token: TokenData) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(token.__dict__, indent=2), encoding="utf-8")
+
+        # Atomic-ish write: write to temp then replace.
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp.write_text(json.dumps(token.__dict__, indent=2), encoding="utf-8")
+        tmp.replace(self.path)
+
         try:
             os.chmod(self.path, 0o600)
         except PermissionError:
-            # Best-effort on weird FS setups
+            # On some platforms/filesystems (or when not running as owner),
+            # chmod can fail; ignore safely.
             pass
 
     def clear(self) -> None:
