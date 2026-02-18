@@ -1,3 +1,4 @@
+# src/reposense_mcp/config.py
 from __future__ import annotations
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,6 +30,9 @@ class Settings(BaseSettings):
     # ---- Rate limit tracking ----
     github_rate_limit_log: bool = False
     github_rate_limit_warn_remaining: int = 50
+
+    app_version: str = "0.1.0"
+    mcp_schema_version: str = "1.0"
 
 
 settings = Settings()

@@ -22,3 +22,6 @@ async def test_ping(mcp_client: Client):
     assert result.data["ok"] is True
     assert result.data["data"]["pong"] is True
     assert result.data["data"]["message"] == "hi"
+    assert "_mcp_version" in result.data
+    assert "meta" in result.data
+    assert result.data["meta"]["tool_name"] == "ping"

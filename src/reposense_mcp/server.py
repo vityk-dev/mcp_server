@@ -165,15 +165,32 @@ def _log_tool(tool: str, start: float, result: dict, **fields: Any) -> None:
 
 
 # -------------------------
+# Helper: best-effort rate-limit snapshot for response metadata
+def _best_effort_rate_limit(*, no_cache: bool = False) -> dict[str, Any] | None:
+    """Return last observed rate-limit snapshot (best effort).
+
+    Never raises: this is only for response metadata.
+    """
+    try:
+        gh = _get_github_client(no_cache=no_cache)
+        st = gh.rate_limit_status()
+        cached = st.get("cached")
+        return cached if isinstance(cached, dict) else None
+    except Exception:
+        return None
+
+
+# -------------------------
 # Tools
 # -------------------------
 @mcp.tool
 def ping(message: str | None = None) -> dict[str, Any]:
     start = time.perf_counter()
+    rid = _resolve_request_id()
     try:
-        out = ok({"pong": True, "message": message})
+        out = ok({"pong": True, "message": message}, tool_name="ping", rid=rid)
     except Exception as e:
-        out = err(e)
+        out = err(e, tool_name="ping", rid=rid)
     _log_tool("ping", start, out)
     return out
 
@@ -181,11 +198,12 @@ def ping(message: str | None = None) -> dict[str, Any]:
 @mcp.tool
 def github_cache_stats() -> dict[str, Any]:
     start = time.perf_counter()
+    rid = _resolve_request_id()
     try:
         cache = _cache_instance()
-        out = ok(cache.stats())
+        out = ok(cache.stats(), tool_name="github_cache_stats", rid=rid)
     except Exception as e:
-        out = err(e)
+        out = err(e, tool_name="github_cache_stats", rid=rid)
     _log_tool("github_cache_stats", start, out)
     return out
 
@@ -193,12 +211,13 @@ def github_cache_stats() -> dict[str, Any]:
 @mcp.tool
 def github_cache_clear() -> dict[str, Any]:
     start = time.perf_counter()
+    rid = _resolve_request_id()
     try:
         cache = _cache_instance()
         cache.clear()
-        out = ok({"cleared": True})
+        out = ok({"cleared": True}, tool_name="github_cache_clear", rid=rid)
     except Exception as e:
-        out = err(e)
+        out = err(e, tool_name="github_cache_clear", rid=rid)
     _log_tool("github_cache_clear", start, out)
     return out
 
@@ -206,6 +225,7 @@ def github_cache_clear() -> dict[str, Any]:
 @mcp.tool
 async def github_auth_start() -> dict[str, Any]:
     start = time.perf_counter()
+    rid = _resolve_request_id()
     try:
         auth = GitHubDeviceAuth(load_github_oauth_config())
         dc = await auth.start()
@@ -217,10 +237,12 @@ async def github_auth_start() -> dict[str, Any]:
                 "expires_in": dc.expires_in,
                 "interval": dc.interval,
                 "instructions": "Open verification_uri in a browser and enter user_code.",
-            }
+            },
+            tool_name="github_auth_start",
+            rid=rid,
         )
     except Exception as e:
-        out = err(e)
+        out = err(e, tool_name="github_auth_start", rid=rid)
     _log_tool("github_auth_start", start, out)
     return out
 
@@ -228,12 +250,13 @@ async def github_auth_start() -> dict[str, Any]:
 @mcp.tool
 async def github_auth_poll(device_code: str) -> dict[str, Any]:
     start = time.perf_counter()
+    rid = _resolve_request_id()
     try:
         auth = GitHubDeviceAuth(load_github_oauth_config())
         status, payload = await auth.poll_once(device_code=device_code)
-        out = ok({"status": status, **payload})
+        out = ok({"status": status, **payload}, tool_name="github_auth_poll", rid=rid)
     except Exception as e:
-        out = err(e)
+        out = err(e, tool_name="github_auth_poll", rid=rid)
     _log_tool("github_auth_poll", start, out)
     return out
 
@@ -241,6 +264,7 @@ async def github_auth_poll(device_code: str) -> dict[str, Any]:
 @mcp.tool
 def github_auth_status() -> dict[str, Any]:
     start = time.perf_counter()
+    rid = _resolve_request_id()
     try:
         auth = GitHubDeviceAuth(load_github_oauth_config())
         st = auth.status()  # {"authorized": bool, "token": {...}} albo {"authorized": False, ...}
@@ -264,7 +288,7 @@ def github_auth_status() -> dict[str, Any]:
 
         if expose:
             # kompatybilność wstecz: zwróć dokładnie co dawał auth.status()
-            out = ok(st)
+            out = ok(st, tool_name="github_auth_status", rid=rid)
         else:
             # prod-safe: bez tokenów
             safe: dict[str, Any] = {"authorized": authorized}
@@ -289,10 +313,10 @@ def github_auth_status() -> dict[str, Any]:
                     "refresh_token_expires_in": token.get("refresh_token_expires_in"),
                 }
 
-            out = ok(safe)
+            out = ok(safe, tool_name="github_auth_status", rid=rid)
 
     except Exception as e:
-        out = err(e)
+        out = err(e, tool_name="github_auth_status", rid=rid)
 
     _log_tool("github_auth_status", start, out)
     return out
@@ -307,6 +331,7 @@ async def github_repo_tree(
     no_cache: bool = False,
 ) -> dict:
     start = time.perf_counter()
+    rid = _resolve_request_id()
     try:
         gh = _get_github_client(no_cache=no_cache)
         data = await gh.repo_tree(owner=owner, repo=repo, ref=ref)
@@ -321,10 +346,18 @@ async def github_repo_tree(
                 "truncated": len(full_tree) > len(tree),
                 "max_items": max_items,
                 "ref": ref,
-            }
+            },
+            tool_name="github_repo_tree",
+            rid=rid,
+            rate_limit=_best_effort_rate_limit(no_cache=no_cache),
         )
     except Exception as e:
-        out = err(e)
+        out = err(
+            e,
+            tool_name="github_repo_tree",
+            rid=rid,
+            rate_limit=_best_effort_rate_limit(no_cache=no_cache),
+        )
 
     _log_tool("github_repo_tree", start, out, owner=owner, repo=repo, ref=ref, no_cache=no_cache)
     return out
@@ -339,6 +372,7 @@ async def github_read_file(
     no_cache: bool = False,
 ) -> dict:
     start = time.perf_counter()
+    rid = _resolve_request_id()
     try:
         policy = RepoPolicy()
         if policy.is_denied(path):
@@ -373,9 +407,19 @@ async def github_read_file(
         content_bytes = base64.b64decode(content_b64.encode("utf-8"), validate=False)
         text = content_bytes.decode("utf-8", errors="replace")
 
-        out = ok({"path": path, "ref": ref, "size": size, "text": text})
+        out = ok(
+            {"path": path, "ref": ref, "size": size, "text": text},
+            tool_name="github_read_file",
+            rid=rid,
+            rate_limit=_best_effort_rate_limit(no_cache=no_cache),
+        )
     except Exception as e:
-        out = err(e)
+        out = err(
+            e,
+            tool_name="github_read_file",
+            rid=rid,
+            rate_limit=_best_effort_rate_limit(no_cache=no_cache),
+        )
 
     _log_tool(
         "github_read_file",
@@ -400,6 +444,7 @@ async def github_search_code(
     no_cache: bool = False,
 ) -> dict:
     start = time.perf_counter()
+    rid = _resolve_request_id()
     try:
         gh = _get_github_client(no_cache=no_cache)
         data = await gh.search_code(
@@ -409,9 +454,19 @@ async def github_search_code(
             path=path,
             max_results=max_results,
         )
-        out = ok(data)
+        out = ok(
+            data,
+            tool_name="github_search_code",
+            rid=rid,
+            rate_limit=_best_effort_rate_limit(no_cache=no_cache),
+        )
     except Exception as e:
-        out = err(e)
+        out = err(
+            e,
+            tool_name="github_search_code",
+            rid=rid,
+            rate_limit=_best_effort_rate_limit(no_cache=no_cache),
+        )
 
     _log_tool(
         "github_search_code",
@@ -438,6 +493,7 @@ async def github_search_repos(
     no_cache: bool = False,
 ) -> dict:
     start = time.perf_counter()
+    rid = _resolve_request_id()
     try:
         gh = _get_github_client(no_cache=no_cache)
         data = await gh.search_repos(
@@ -448,9 +504,19 @@ async def github_search_repos(
             sort=sort,
             max_results=max_results,
         )
-        out = ok(data)
+        out = ok(
+            data,
+            tool_name="github_search_repos",
+            rid=rid,
+            rate_limit=_best_effort_rate_limit(no_cache=no_cache),
+        )
     except Exception as e:
-        out = err(e)
+        out = err(
+            e,
+            tool_name="github_search_repos",
+            rid=rid,
+            rate_limit=_best_effort_rate_limit(no_cache=no_cache),
+        )
 
     _log_tool(
         "github_search_repos",
@@ -480,6 +546,7 @@ async def github_read_excerpt(
     no_cache: bool = False,
 ) -> dict:
     start = time.perf_counter()
+    rid = _resolve_request_id()
     try:
         # --- validate mode ---
         modes = 0
@@ -597,10 +664,18 @@ async def github_read_excerpt(
                 "end_line": out_end,
                 "truncated": truncated,
                 "text": excerpt_text,
-            }
+            },
+            tool_name="github_read_excerpt",
+            rid=rid,
+            rate_limit=_best_effort_rate_limit(no_cache=no_cache),
         )
     except Exception as e:
-        out = err(e)
+        out = err(
+            e,
+            tool_name="github_read_excerpt",
+            rid=rid,
+            rate_limit=_best_effort_rate_limit(no_cache=no_cache),
+        )
 
     _log_tool(
         "github_read_excerpt",
@@ -618,6 +693,7 @@ async def github_read_excerpt(
 @mcp.tool
 def github_auth_logout() -> dict[str, Any]:
     start = time.perf_counter()
+    rid = _resolve_request_id()
     try:
         auth = GitHubDeviceAuth(load_github_oauth_config())
         logout_result = auth.logout()
@@ -625,9 +701,13 @@ def github_auth_logout() -> dict[str, Any]:
         _cache_instance().clear()
         _try_schedule_aclose()
 
-        out = ok({**logout_result, "cache_cleared": True, "clients_closing": True})
+        out = ok(
+            {**logout_result, "cache_cleared": True, "clients_closing": True},
+            tool_name="github_auth_logout",
+            rid=rid,
+        )
     except Exception as e:
-        out = err(e)
+        out = err(e, tool_name="github_auth_logout", rid=rid)
 
     _log_tool("github_auth_logout", start, out)
     return out
@@ -642,6 +722,7 @@ def github_rate_limit_status(no_cache: bool = False) -> dict[str, Any]:
     - So it doesn't matter whether the last request was made with no_cache=True/False.
     """
     start = time.perf_counter()
+    rid = _resolve_request_id()
     try:
         # Ensure at least one client exists (so token fingerprint can be computed)
         gh = _get_github_client(no_cache=no_cache)
@@ -654,10 +735,18 @@ def github_rate_limit_status(no_cache: bool = False) -> dict[str, Any]:
                     "cached_client": True,
                     "nocache_client": True,
                 },
-            }
+            },
+            tool_name="github_rate_limit_status",
+            rid=rid,
+            rate_limit=st.get("cached") if isinstance(st.get("cached"), dict) else None,
         )
     except Exception as e:
-        out = err(e)
+        out = err(
+            e,
+            tool_name="github_rate_limit_status",
+            rid=rid,
+            rate_limit=_best_effort_rate_limit(no_cache=no_cache),
+        )
 
     _log_tool("github_rate_limit_status", start, out, no_cache=no_cache)
     return out
@@ -673,6 +762,7 @@ async def github_repo_snapshot(
     no_cache: bool = False,
 ) -> dict:
     start = time.perf_counter()
+    rid = _resolve_request_id()
     try:
         from collections import Counter
 
@@ -830,10 +920,18 @@ async def github_repo_snapshot(
                     "max_file_bytes": policy.max_file_bytes,
                     "deny_patterns": list(policy.deny_patterns),
                 },
-            }
+            },
+            tool_name="github_repo_snapshot",
+            rid=rid,
+            rate_limit=_best_effort_rate_limit(no_cache=no_cache),
         )
     except Exception as e:
-        out = err(e)
+        out = err(
+            e,
+            tool_name="github_repo_snapshot",
+            rid=rid,
+            rate_limit=_best_effort_rate_limit(no_cache=no_cache),
+        )
 
     _log_tool(
         "github_repo_snapshot", start, out, owner=owner, repo=repo, ref=ref, no_cache=no_cache
