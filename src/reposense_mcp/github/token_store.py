@@ -5,17 +5,16 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
 
 
 @dataclass
 class TokenData:
     access_token: str
     token_type: str = "bearer"
-    expires_in: Optional[int] = None
-    refresh_token: Optional[str] = None
-    refresh_token_expires_in: Optional[int] = None
-    scope: Optional[str] = None
+    expires_in: int | None = None
+    refresh_token: str | None = None
+    refresh_token_expires_in: int | None = None
+    scope: str | None = None
 
 
 class TokenStore:
@@ -24,11 +23,11 @@ class TokenStore:
     Later we can swap this for macOS Keychain.
     """
 
-    def __init__(self, path: Optional[Path] = None):
+    def __init__(self, path: Path | None = None):
         default_path = Path.home() / ".reposense_mcp" / "github_token.json"
         self.path = path or default_path
 
-    def load(self) -> Optional[TokenData]:
+    def load(self) -> TokenData | None:
         if not self.path.exists():
             return None
         data = json.loads(self.path.read_text(encoding="utf-8"))

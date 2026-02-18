@@ -1,17 +1,16 @@
 # tests/test_logging.py
 import json
 import logging
-from fastapi.testclient import TestClient
 
+import httpx
 import pytest
 import respx
-import httpx
-
-from reposense_mcp.app import create_api
-from reposense_mcp.server import mcp
+from fastapi.testclient import TestClient
 from fastmcp.client import Client
 
+from reposense_mcp.app import create_api
 from reposense_mcp.mcp.context import set_request_id
+from reposense_mcp.server import mcp
 
 
 def _json_logs(caplog):
@@ -56,7 +55,9 @@ def test_http_request_log_emitted_once(caplog):
         assert r.status_code == 200
 
         logs = _json_logs(caplog)
-        http_logs = [e for e in logs if e.get("event") == "http_request" and e.get("rid") == "rid_http_1"]
+        http_logs = [
+            e for e in logs if e.get("event") == "http_request" and e.get("rid") == "rid_http_1"
+        ]
         assert len(http_logs) == 1
 
 
@@ -166,7 +167,9 @@ async def test_github_client_error_log_has_rid_and_no_token(caplog, monkeypatch,
     assert "Bearer " not in raw_text
 
     logs = _json_logs(caplog)
-    err_logs = [e for e in logs if e.get("event") == "github_http_error" and e.get("rid") == "rid_gh_1"]
+    err_logs = [
+        e for e in logs if e.get("event") == "github_http_error" and e.get("rid") == "rid_gh_1"
+    ]
     assert len(err_logs) == 1
 
     e = err_logs[0]

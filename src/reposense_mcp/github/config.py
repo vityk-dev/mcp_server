@@ -1,8 +1,8 @@
 # src/reposense_mcp/github/config.py
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 
 from reposense_mcp.config import settings
 from reposense_mcp.errors import RepoSenseError
@@ -36,8 +36,16 @@ def load_github_oauth_config() -> GitHubOAuthConfig:
     legacy_id = _env("GITHUB_APP_CLIENT_ID")
     legacy_secret = _env("GITHUB_APP_CLIENT_SECRET")
 
-    pref_id = _env("REPOSENSE_GITHUB_APP_CLIENT_ID") or (settings.github_app_client_id or "").strip() or None
-    pref_secret = _env("REPOSENSE_GITHUB_APP_CLIENT_SECRET") or (settings.github_app_client_secret or "").strip() or None
+    pref_id = (
+        _env("REPOSENSE_GITHUB_APP_CLIENT_ID")
+        or (settings.github_app_client_id or "").strip()
+        or None
+    )
+    pref_secret = (
+        _env("REPOSENSE_GITHUB_APP_CLIENT_SECRET")
+        or (settings.github_app_client_secret or "").strip()
+        or None
+    )
 
     client_id = (legacy_id or pref_id or "").strip()
     client_secret = (legacy_secret or pref_secret or "").strip()

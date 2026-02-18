@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Awaitable, Callable, Dict, TypeVar
+from collections.abc import Awaitable, Callable
+from typing import Any, TypeVar
 
 from reposense_mcp.logging_config import get_logger
 from reposense_mcp.mcp.context import get_request_id
@@ -22,8 +23,9 @@ def tool_logged(tool_name: str):
       - elapsed_ms
       - selected high-signal arguments (owner/repo/ref/path/query)
     """
-    def deco(fn: Callable[..., Awaitable[Dict[str, Any]]] | Callable[..., Dict[str, Any]]):
-        async def async_wrapper(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+
+    def deco(fn: Callable[..., Awaitable[dict[str, Any]]] | Callable[..., dict[str, Any]]):
+        async def async_wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
             rid = get_request_id()
             start = time.perf_counter()
 
@@ -46,7 +48,9 @@ def tool_logged(tool_name: str):
                     code = None
                     if isinstance(out, dict):
                         code = (out.get("error") or {}).get("code")
-                    log.warning("tool_call", **fields, ok=False, error_code=code, elapsed_ms=elapsed_ms)
+                    log.warning(
+                        "tool_call", **fields, ok=False, error_code=code, elapsed_ms=elapsed_ms
+                    )
                 return out  # type: ignore[return-value]
             except Exception:
                 elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -54,4 +58,5 @@ def tool_logged(tool_name: str):
                 raise
 
         return async_wrapper
+
     return deco

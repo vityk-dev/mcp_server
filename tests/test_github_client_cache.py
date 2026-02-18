@@ -41,7 +41,8 @@ async def test_repo_tree_tree_call_is_cached(monkeypatch, tmp_path):
 
     # tree happens once (cache)
     assert tree_route.call_count == 1
-    
+
+
 @respx.mock
 @pytest.mark.asyncio
 async def test_repo_tree_is_cached(monkeypatch, tmp_path):
@@ -55,10 +56,9 @@ async def test_repo_tree_is_cached(monkeypatch, tmp_path):
 
     # sha -> tree (should be cached)
     tree_route = respx.get(
-    "https://api.github.com/repos/acme/demo/git/trees/abc123",
-    params={"recursive": "1"},
+        "https://api.github.com/repos/acme/demo/git/trees/abc123",
+        params={"recursive": "1"},
     ).mock(return_value=httpx.Response(200, json={"sha": "abc123", "tree": []}))
-    
 
     gh = GitHubClient()
 
@@ -92,9 +92,9 @@ async def test_read_file_is_cached(monkeypatch, tmp_path):
         )
 
     file_route = respx.get(
-    "https://api.github.com/repos/acme/demo/contents/readme.md",
+        "https://api.github.com/repos/acme/demo/contents/readme.md",
         params={"ref": "main"},
-        ).mock(return_value=contents_resp("hello"))
+    ).mock(return_value=contents_resp("hello"))
 
     gh = GitHubClient()
 

@@ -1,20 +1,24 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
-import time
 import hashlib
 import json
+import time
+from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
+from reposense_mcp.cache import default_cache, make_key
+from reposense_mcp.config import settings
+from reposense_mcp.errors import RepoSenseError
+from reposense_mcp.github.rate_limit import (
+    RateLimitSnapshot,
+    RateLimitTracker,
+    default_rate_limit_tracker,
+)
 from reposense_mcp.github.token_store import TokenStore
 from reposense_mcp.logging_config import get_logger
 from reposense_mcp.mcp.context import ensure_request_id
-from reposense_mcp.config import settings
-from reposense_mcp.cache import default_cache, make_key
-from reposense_mcp.errors import RepoSenseError
-from reposense_mcp.github.rate_limit import RateLimitSnapshot, RateLimitTracker, default_rate_limit_tracker
 
 log = get_logger("reposense_mcp.github")
 
@@ -55,8 +59,8 @@ class GitHubClient:
 
     def __init__(
         self,
-        cfg: Optional[GitHubClientConfig] = None,
-        store: Optional[TokenStore] = None,
+        cfg: GitHubClientConfig | None = None,
+        store: TokenStore | None = None,
         rate_limit_tracker: RateLimitTracker | None = None,
     ):
         self.cfg = cfg or GitHubClientConfig()
@@ -86,7 +90,7 @@ class GitHubClient:
             raise RuntimeError("Not authorized. Run github_auth_start + github_auth_poll first.")
         return token.access_token
 
-    def _headers(self, *, accept: str | None = None) -> Dict[str, str]:
+    def _headers(self, *, accept: str | None = None) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {self._token()}",
             "Accept": accept or "application/vnd.github+json",
@@ -101,7 +105,7 @@ class GitHubClient:
             return False
         return all(c in "0123456789abcdef" for c in r)
 
-    def _cache_get(self, key: str) -> Optional[Any]:
+    def _cache_get(self, key: str) -> Any | None:
         if not self._cache:
             return None
         return self._cache.get(key)
@@ -166,8 +170,10 @@ class GitHubClient:
         else:
             thr = int(getattr(settings, "github_rate_limit_warn_remaining", 50))
             remaining = snap.remaining
-            low = (remaining is not None and remaining <= thr)
-            limited = r.status_code in (429, 403) and (snap.retry_after_s is not None or (snap.remaining == 0))
+            low = remaining is not None and remaining <= thr
+            limited = r.status_code in (429, 403) and (
+                snap.retry_after_s is not None or (snap.remaining == 0)
+            )
             if low or limited:
                 log.warning(
                     "github_rate_limit_observed",
@@ -185,7 +191,7 @@ class GitHubClient:
 
         return snap
 
-    def rate_limit_status(self) -> Dict[str, Any]:
+    def rate_limit_status(self) -> dict[str, Any]:
         return self._rl.status(token_fingerprint=self._current_token_fp())
 
     def _raise_rate_limited(self, *, action: str, r: httpx.Response, elapsed_ms: int) -> None:
@@ -217,7 +223,10 @@ class GitHubClient:
         raise RepoSenseError(
             code="rate_limited",
             message=msg,
-            hint="Wait until reset (or Retry-After), then retry. Consider reducing call rate or enabling caching.",
+            hint=(
+                "Wait until reset (or Retry-After), then retry. "
+                "Consider reducing call rate or enabling caching."
+            ),
             details=details,
         )
 
@@ -360,16 +369,32 @@ class GitHubClient:
 
         return sha
 
-    async def repo_tree(self, owner: str, repo: str, ref: str) -> Dict[str, Any]:
+    async def repo_tree(self, owner: str, repo: str, ref: str) -> dict[str, Any]:
         sha = await self.resolve_ref_to_sha(owner=owner, repo=repo, ref=ref)
 
         cache_key = make_key("github", "repo_tree", owner, repo, ref, sha, "recursive=1")
         cached = self._cache_get(cache_key)
         if cached is not None:
-            self._cache_log("github_cache_hit", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref, sha=sha)
+            self._cache_log(
+                "github_cache_hit",
+                action="repo_tree",
+                key=cache_key,
+                owner=owner,
+                repo=repo,
+                ref=ref,
+                sha=sha,
+            )
             return cached
 
-        self._cache_log("github_cache_miss", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref, sha=sha)
+        self._cache_log(
+            "github_cache_miss",
+            action="repo_tree",
+            key=cache_key,
+            owner=owner,
+            repo=repo,
+            ref=ref,
+            sha=sha,
+        )
 
         url = f"{self.cfg.api_base}/repos/{owner}/{repo}/git/trees/{sha}"
 
@@ -422,18 +447,43 @@ class GitHubClient:
         data = r.json()
         ttl_used = self._ttl_for_ref(ref)
         self._cache_set(cache_key, data, ttl_seconds=ttl_used)
-        self._cache_log("github_cache_set", action="repo_tree", key=cache_key, owner=owner, repo=repo, ref=ref, sha=sha, ttl_seconds=ttl_used)
+        self._cache_log(
+            "github_cache_set",
+            action="repo_tree",
+            key=cache_key,
+            owner=owner,
+            repo=repo,
+            ref=ref,
+            sha=sha,
+            ttl_seconds=ttl_used,
+        )
         return data
 
-    async def read_file(self, owner: str, repo: str, path: str, ref: str) -> Dict[str, Any]:
+    async def read_file(self, owner: str, repo: str, path: str, ref: str) -> dict[str, Any]:
         path = path.lstrip("/")
         cache_key = make_key("github", "read_file", owner, repo, ref, path)
         cached = self._cache_get(cache_key)
         if cached is not None:
-            self._cache_log("github_cache_hit", action="read_file", key=cache_key, owner=owner, repo=repo, ref=ref, path=path)
+            self._cache_log(
+                "github_cache_hit",
+                action="read_file",
+                key=cache_key,
+                owner=owner,
+                repo=repo,
+                ref=ref,
+                path=path,
+            )
             return cached
 
-        self._cache_log("github_cache_miss", action="read_file", key=cache_key, owner=owner, repo=repo, ref=ref, path=path)
+        self._cache_log(
+            "github_cache_miss",
+            action="read_file",
+            key=cache_key,
+            owner=owner,
+            repo=repo,
+            ref=ref,
+            path=path,
+        )
 
         url = f"{self.cfg.api_base}/repos/{owner}/{repo}/contents/{path}"
 
@@ -467,8 +517,7 @@ class GitHubClient:
                 path=path,
             )
             raise RuntimeError(
-                f"Failed to read file {owner}/{repo}:{path}@{ref}. "
-                f"HTTP {r.status_code}: {r.text}"
+                f"Failed to read file {owner}/{repo}:{path}@{ref}. HTTP {r.status_code}: {r.text}"
             ) from e
 
         self._log_http_ok(
@@ -486,18 +535,27 @@ class GitHubClient:
         data = r.json()
         ttl_used = self._ttl_for_ref(ref)
         self._cache_set(cache_key, data, ttl_seconds=ttl_used)
-        self._cache_log("github_cache_set", action="read_file", key=cache_key, owner=owner, repo=repo, ref=ref, path=path, ttl_seconds=ttl_used)
+        self._cache_log(
+            "github_cache_set",
+            action="read_file",
+            key=cache_key,
+            owner=owner,
+            repo=repo,
+            ref=ref,
+            path=path,
+            ttl_seconds=ttl_used,
+        )
         return data
 
     async def search_code(
         self,
         *,
         query: str,
-        repo: str | None = None,      # "owner/repo"
+        repo: str | None = None,  # "owner/repo"
         language: str | None = None,  # "python"
-        path: str | None = None,      # "src/" albo "server.py"
+        path: str | None = None,  # "src/" albo "server.py"
         max_results: int = 10,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         q = (query or "").strip()
         if not q:
             raise RuntimeError("query is required")
@@ -593,6 +651,7 @@ class GitHubClient:
             "incomplete_results": bool(data.get("incomplete_results") or False),
             "items": out_items,
         }
+
     async def search_repos(
         self,
         *,
@@ -602,7 +661,7 @@ class GitHubClient:
         topics: list[str] | None = None,
         sort: str = "stars",
         max_results: int = 10,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         allowed_sort = {"stars", "forks", "updated"}
         if sort not in allowed_sort:
             raise RepoSenseError(
@@ -676,7 +735,9 @@ class GitHubClient:
                 elapsed_ms=elapsed_ms,
                 extra={"query": search_query},
             )
-            raise RuntimeError(f"Failed to search repositories. HTTP {r.status_code}: {r.text}") from e
+            raise RuntimeError(
+                f"Failed to search repositories. HTTP {r.status_code}: {r.text}"
+            ) from e
 
         self._log_http_ok(
             action="search_repos",

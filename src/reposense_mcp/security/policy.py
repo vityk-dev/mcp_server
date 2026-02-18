@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import fnmatch
-
+from dataclasses import dataclass
 
 DEFAULT_DENY_PATTERNS = [
     ".env",

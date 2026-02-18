@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="REPOSENSE_", extra="ignore")
 
     log_level: str = "INFO"
-    
+
     # SECURITY: never enable in production
     expose_tokens: bool = False
 

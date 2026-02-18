@@ -5,20 +5,20 @@ import logging
 import sys
 import time
 import uuid
-from typing import Any, Dict
+from typing import Any
 
 import structlog
 
 from reposense_mcp.config import settings
 
 
-def _add_timestamp(_: Any, __: str, event_dict: Dict[str, Any]) -> Dict[str, Any]:
+def _add_timestamp(_: Any, __: str, event_dict: dict[str, Any]) -> dict[str, Any]:
     # epoch milliseconds (compact + easy to index)
     event_dict["ts_ms"] = int(time.time() * 1000)
     return event_dict
 
 
-def _add_level(_: Any, __: str, event_dict: Dict[str, Any]) -> Dict[str, Any]:
+def _add_level(_: Any, __: str, event_dict: dict[str, Any]) -> dict[str, Any]:
     # structlog adds level later, but we normalize naming
     if "level" not in event_dict and "log_level" in event_dict:
         event_dict["level"] = event_dict.pop("log_level")

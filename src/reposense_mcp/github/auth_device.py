@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import httpx
 
@@ -28,7 +28,7 @@ class DeviceCode:
 
 
 class GitHubDeviceAuth:
-    def __init__(self, cfg: GitHubOAuthConfig, store: Optional[TokenStore] = None):
+    def __init__(self, cfg: GitHubOAuthConfig, store: TokenStore | None = None):
         self.cfg = cfg
         self.store = store or TokenStore()
 
@@ -58,7 +58,7 @@ class GitHubDeviceAuth:
             interval=int(j.get("interval", 5)),
         )
 
-    async def poll_once(self, device_code: str) -> Tuple[str, Dict[str, Any]]:
+    async def poll_once(self, device_code: str) -> tuple[str, dict[str, Any]]:
         """
         Returns (status, payload)
         status: "pending" | "slow_down" | "denied" | "expired" | "error" | "authorized"
@@ -105,13 +105,13 @@ class GitHubDeviceAuth:
 
         return "error", {"error": err or "unknown", "error_description": j.get("error_description")}
 
-    def status(self) -> Dict[str, Any]:
+    def status(self) -> dict[str, Any]:
         token = self.store.load()
         return {
             "authorized": bool(token and token.access_token),
             "token": (token.__dict__ if token else None),
         }
 
-    def logout(self) -> Dict[str, Any]:
+    def logout(self) -> dict[str, Any]:
         self.store.clear()
         return {"ok": True}

@@ -6,7 +6,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 
 @dataclass
@@ -16,7 +16,7 @@ class CacheStats:
     sets: int = 0
     evictions: int = 0
 
-    def as_dict(self) -> Dict[str, int]:
+    def as_dict(self) -> dict[str, int]:
         return {
             "hits": self.hits,
             "misses": self.misses,
@@ -41,7 +41,7 @@ class TTLCache:
 
         self._lock = threading.Lock()
         # key -> (expires_at, value) ordered by recency
-        self._items: "OrderedDict[str, Tuple[float, Any]]" = OrderedDict()
+        self._items: OrderedDict[str, tuple[float, Any]] = OrderedDict()
         # heap entries: (expires_at, key)
         self._exp_heap: list[tuple[float, str]] = []
 
@@ -63,7 +63,7 @@ class TTLCache:
                 self._items.pop(key, None)
                 self._stats.evictions += 1
 
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: str) -> Any | None:
         now = self._now()
         with self._lock:
             self._purge_expired_locked(now)
@@ -85,7 +85,7 @@ class TTLCache:
             self._stats.hits += 1
             return value
 
-    def set(self, key: str, value: Any, ttl_seconds: Optional[float] = None) -> None:
+    def set(self, key: str, value: Any, ttl_seconds: float | None = None) -> None:
         now = self._now()
         ttl = self.ttl_seconds if ttl_seconds is None else float(ttl_seconds)
         exp = now + max(0.0, ttl)
@@ -120,7 +120,7 @@ class TTLCache:
             self._exp_heap.clear()
             self._stats = CacheStats()
 
-    def stats(self) -> Dict[str, Any]:
+    def stats(self) -> dict[str, Any]:
         now = self._now()
         with self._lock:
             self._purge_expired_locked(now)

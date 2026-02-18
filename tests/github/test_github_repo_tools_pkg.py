@@ -40,7 +40,9 @@ async def test_repo_tree(mcp_client, monkeypatch, tmp_path):
         )
     )
 
-    r = await mcp_client.call_tool("github_repo_tree", {"owner": "acme", "repo": "demo", "ref": "main"})
+    r = await mcp_client.call_tool(
+        "github_repo_tree", {"owner": "acme", "repo": "demo", "ref": "main"}
+    )
     assert r.data["ok"] is True
     assert r.data["data"]["sha"] == "abc"
     assert r.data["data"]["tree"][0]["path"] == "README.md"
@@ -72,7 +74,9 @@ async def test_read_file_denied(mcp_client, monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     _write_token(tmp_path)
 
-    r = await mcp_client.call_tool("github_read_file", {"owner": "acme", "repo": "demo", "path": ".env", "ref": "main"})
+    r = await mcp_client.call_tool(
+        "github_read_file", {"owner": "acme", "repo": "demo", "path": ".env", "ref": "main"}
+    )
     assert r.data["ok"] is False
     assert r.data["error"]["code"] == "access_denied"
     assert r.data["error"]["details"]["path"] == ".env"

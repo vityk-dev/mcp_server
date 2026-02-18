@@ -1,26 +1,32 @@
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Literal
+
 from pydantic import BaseModel, Field
+
 
 class ToolSchema(BaseModel):
     name: str
     description: str
-    input_schema: Dict[str, Any]
+    input_schema: dict[str, Any]
+
 
 class MCPError(BaseModel):
     code: str
     message: str
-    details: Optional[Dict[str, Any]] = None
+    details: dict[str, Any] | None = None
+
 
 class MCPResponse(BaseModel):
     ok: bool
-    data: Optional[Dict[str, Any]] = None
-    error: Optional[MCPError] = None
-    meta: Dict[str, Any] = Field(default_factory=dict)
+    data: dict[str, Any] | None = None
+    error: MCPError | None = None
+    meta: dict[str, Any] = Field(default_factory=dict)
+
 
 class MCPRequest(BaseModel):
     action: Literal["list_tools", "call_tool", "list_prompts"]
-    params: Dict[str, Any] = Field(default_factory=dict)
+    params: dict[str, Any] = Field(default_factory=dict)
+
 
 class CallToolParams(BaseModel):
     name: str
-    arguments: Dict[str, Any] = Field(default_factory=dict)
+    arguments: dict[str, Any] = Field(default_factory=dict)

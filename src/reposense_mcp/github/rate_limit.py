@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, Mapping
 import threading
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 
 
 def _int(v: str | None) -> int | None:
@@ -57,7 +58,7 @@ class RateLimitSnapshot:
         except Exception:
             return None
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "limit": self.limit,
             "remaining": self.remaining,
@@ -155,7 +156,7 @@ class RateLimitTracker:
 
         return snap
 
-    def status(self, *, token_fingerprint: str) -> Dict[str, Any]:
+    def status(self, *, token_fingerprint: str) -> dict[str, Any]:
         tfp = token_fingerprint or "unknown"
 
         resources: dict[str, Any] = {}
@@ -169,14 +170,18 @@ class RateLimitTracker:
                 resources[f"{k_tfp}:{resource}"] = snap.as_dict()
 
                 if k_tfp == tfp:
-                    if latest is None or (snap.observed_at_ts or 0.0) > (latest.observed_at_ts or 0.0):
+                    if latest is None or (snap.observed_at_ts or 0.0) > (
+                        latest.observed_at_ts or 0.0
+                    ):
                         latest = snap
 
             if latest is None:
                 for (k_tfp, _resource), snap in self._data.items():
                     if k_tfp != "unknown":
                         continue
-                    if latest is None or (snap.observed_at_ts or 0.0) > (latest.observed_at_ts or 0.0):
+                    if latest is None or (snap.observed_at_ts or 0.0) > (
+                        latest.observed_at_ts or 0.0
+                    ):
                         latest = snap
 
         return {

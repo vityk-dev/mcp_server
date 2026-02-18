@@ -5,8 +5,8 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
-
 from fastmcp.client import Client
+
 from reposense_mcp.server import mcp
 
 

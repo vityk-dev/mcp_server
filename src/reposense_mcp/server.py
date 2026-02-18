@@ -5,7 +5,7 @@ import asyncio
 import base64
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastmcp import FastMCP
 
@@ -168,7 +168,7 @@ def _log_tool(tool: str, start: float, result: dict, **fields: Any) -> None:
 # Tools
 # -------------------------
 @mcp.tool
-def ping(message: Optional[str] = None) -> Dict[str, Any]:
+def ping(message: str | None = None) -> dict[str, Any]:
     start = time.perf_counter()
     try:
         out = ok({"pong": True, "message": message})
@@ -179,7 +179,7 @@ def ping(message: Optional[str] = None) -> Dict[str, Any]:
 
 
 @mcp.tool
-def github_cache_stats() -> Dict[str, Any]:
+def github_cache_stats() -> dict[str, Any]:
     start = time.perf_counter()
     try:
         cache = _cache_instance()
@@ -191,7 +191,7 @@ def github_cache_stats() -> Dict[str, Any]:
 
 
 @mcp.tool
-def github_cache_clear() -> Dict[str, Any]:
+def github_cache_clear() -> dict[str, Any]:
     start = time.perf_counter()
     try:
         cache = _cache_instance()
@@ -204,7 +204,7 @@ def github_cache_clear() -> Dict[str, Any]:
 
 
 @mcp.tool
-async def github_auth_start() -> Dict[str, Any]:
+async def github_auth_start() -> dict[str, Any]:
     start = time.perf_counter()
     try:
         auth = GitHubDeviceAuth(load_github_oauth_config())
@@ -226,7 +226,7 @@ async def github_auth_start() -> Dict[str, Any]:
 
 
 @mcp.tool
-async def github_auth_poll(device_code: str) -> Dict[str, Any]:
+async def github_auth_poll(device_code: str) -> dict[str, Any]:
     start = time.perf_counter()
     try:
         auth = GitHubDeviceAuth(load_github_oauth_config())
@@ -239,7 +239,7 @@ async def github_auth_poll(device_code: str) -> Dict[str, Any]:
 
 
 @mcp.tool
-def github_auth_status() -> Dict[str, Any]:
+def github_auth_status() -> dict[str, Any]:
     start = time.perf_counter()
     try:
         auth = GitHubDeviceAuth(load_github_oauth_config())
@@ -254,6 +254,7 @@ def github_auth_status() -> Dict[str, Any]:
 
         # 1) pytest ustawia zmienną środowiskową PYTEST_CURRENT_TEST
         import os
+
         if os.getenv("PYTEST_CURRENT_TEST"):
             expose = True
 
@@ -376,8 +377,18 @@ async def github_read_file(
     except Exception as e:
         out = err(e)
 
-    _log_tool("github_read_file", start, out, owner=owner, repo=repo, ref=ref, path=path, no_cache=no_cache)
+    _log_tool(
+        "github_read_file",
+        start,
+        out,
+        owner=owner,
+        repo=repo,
+        ref=ref,
+        path=path,
+        no_cache=no_cache,
+    )
     return out
+
 
 @mcp.tool
 async def github_search_code(
@@ -408,12 +419,13 @@ async def github_search_code(
         out,
         no_cache=no_cache,
         repo=repo,
-        query=query, 
+        query=query,
         language=language,
         path=path,
         max_results=max_results,
     )
     return out
+
 
 @mcp.tool
 async def github_search_repos(
@@ -447,12 +459,13 @@ async def github_search_repos(
         no_cache=no_cache,
         language=language,
         stars=stars,
-        query=query, 
+        query=query,
         topics=topics,
         sort=sort,
         max_results=max_results,
     )
     return out
+
 
 @mcp.tool
 async def github_read_excerpt(
@@ -589,12 +602,21 @@ async def github_read_excerpt(
     except Exception as e:
         out = err(e)
 
-    _log_tool("github_read_excerpt", start, out, owner=owner, repo=repo, ref=ref, path=path, no_cache=no_cache)
+    _log_tool(
+        "github_read_excerpt",
+        start,
+        out,
+        owner=owner,
+        repo=repo,
+        ref=ref,
+        path=path,
+        no_cache=no_cache,
+    )
     return out
 
 
 @mcp.tool
-def github_auth_logout() -> Dict[str, Any]:
+def github_auth_logout() -> dict[str, Any]:
     start = time.perf_counter()
     try:
         auth = GitHubDeviceAuth(load_github_oauth_config())
@@ -612,7 +634,7 @@ def github_auth_logout() -> Dict[str, Any]:
 
 
 @mcp.tool
-def github_rate_limit_status(no_cache: bool = False) -> Dict[str, Any]:
+def github_rate_limit_status(no_cache: bool = False) -> dict[str, Any]:
     """Returns last observed GitHub rate-limit snapshots inferred from response headers.
 
     Production-ready behavior:
@@ -757,7 +779,10 @@ async def github_repo_snapshot(
 
         pathset = set(paths)
         stack = {
-            "python": any(p in pathset for p in ("pyproject.toml", "requirements.txt", "setup.py", "setup.cfg"))
+            "python": any(
+                p in pathset
+                for p in ("pyproject.toml", "requirements.txt", "setup.py", "setup.cfg")
+            )
             or any(p.endswith(".py") for p in paths),
             "cpp": any(p.endswith((".cpp", ".cc", ".cxx", ".hpp", ".h")) for p in paths)
             or "CMakeLists.txt" in pathset,
@@ -810,5 +835,7 @@ async def github_repo_snapshot(
     except Exception as e:
         out = err(e)
 
-    _log_tool("github_repo_snapshot", start, out, owner=owner, repo=repo, ref=ref, no_cache=no_cache)
+    _log_tool(
+        "github_repo_snapshot", start, out, owner=owner, repo=repo, ref=ref, no_cache=no_cache
+    )
     return out

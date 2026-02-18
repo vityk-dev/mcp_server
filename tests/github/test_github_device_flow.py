@@ -1,10 +1,7 @@
 # tests/github/test_github_device_flow.py
-import respx
 import httpx
-import pytest
+import respx
 
-from fastmcp.client import Client
-from reposense_mcp.server import mcp
 
 @respx.mock
 async def test_github_auth_start(mcp_client, monkeypatch):
@@ -60,8 +57,6 @@ async def test_github_auth_poll_pending_then_authorized(mcp_client, monkeypatch,
     assert r1.data["ok"] is True
     assert r1.data["data"]["status"] == "pending"
 
-
-
     r2 = await mcp_client.call_tool("github_auth_poll", {"device_code": "dev123"})
     assert r2.data["ok"] is True
     assert r2.data["data"]["status"] == "authorized"
@@ -71,5 +66,3 @@ async def test_github_auth_poll_pending_then_authorized(mcp_client, monkeypatch,
     assert st.data["ok"] is True
     assert st.data["data"]["authorized"] is True
     assert st.data["data"]["token"]["access_token"] == "tok_abc"
-    
-    

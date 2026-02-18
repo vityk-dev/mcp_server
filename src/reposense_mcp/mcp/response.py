@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 from reposense_mcp.errors import RepoSenseError
 
 
-def ok(data: Any, *, stats: Dict[str, Any] | None = None, warnings: list[str] | None = None) -> Dict[str, Any]:
+def ok(
+    data: Any, *, stats: dict[str, Any] | None = None, warnings: list[str] | None = None
+) -> dict[str, Any]:
     return {
         "ok": True,
         "data": data,
@@ -14,7 +16,7 @@ def ok(data: Any, *, stats: Dict[str, Any] | None = None, warnings: list[str] | 
     }
 
 
-def err(e: Exception) -> Dict[str, Any]:
+def err(e: Exception) -> dict[str, Any]:
     if isinstance(e, RepoSenseError):
         return {
             "ok": False,
