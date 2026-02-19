@@ -6,3 +6,18 @@ __pycache__/
 .ruff_cache/
 .DS_Store
 .mcp_sid
+node_modules/
+
+# Wrangler / CF
+.wrangler/
+wrangler.toml.local
+
+dist/
+out/
+
+# logs
+*.log
+
+# env / secrets
+.env
+.env.*

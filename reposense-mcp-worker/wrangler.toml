@@ -1,0 +1,30 @@
+name = "reposense-mcp"
+main = "src/index.ts"
+compatibility_date = "2025-02-01"
+
+[vars]
+VERSION = "1.0.0"
+MCP_PROTOCOL_VERSION = "2024-11-05"
+RATE_LIMIT_RPM = "60"
+POLICY_DENY_PATTERNS = "[]"
+POLICY_MAX_FILE_BYTES = "1000000"
+POLICY_MAX_TREE_ITEMS = "5000"
+
+[[kv_namespaces]]
+binding = "CACHE_KV"
+id = "REPLACE_ME"
+preview_id = "REPLACE_ME"
+
+[[kv_namespaces]]
+binding = "AUTH_KV"
+id = "REPLACE_ME"
+preview_id = "REPLACE_ME"
+
+[durable_objects]
+bindings = [
+  { name = "RATE_LIMITER", class_name = "RateLimiterDO" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["RateLimiterDO"]
