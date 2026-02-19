@@ -6,15 +6,18 @@ import { nanoid8, readJson, sseResponse, type JsonRpcRequest, type JsonRpcRespon
 import { tools, toolsList } from "./tools/registry";
 import { promptsList, promptsGet } from "./prompts";
 import { RateLimiterDO } from "./ratelimiter_do";
+import { handleOAuth, isOAuthPath, verifyAccessToken } from "./oauth";
 
 export { RateLimiterDO };
 
 type Env = {
   VERSION: string;
   MCP_PROTOCOL_VERSION: string;
-  MCP_BEARER: string;
-  SESSION_HMAC_SECRET: string;
 
+  // legacy (you can remove later)
+  MCP_BEARER: string;
+
+  SESSION_HMAC_SECRET: string;
   CACHE_ENCRYPTION_KEY: string;
 
   GITHUB_CLIENT_ID: string;
@@ -29,6 +32,13 @@ type Env = {
   POLICY_DENY_PATTERNS: string;
   POLICY_MAX_FILE_BYTES: string;
   POLICY_MAX_TREE_ITEMS: string;
+
+  // OAuth (workers-oauth-provider style)
+  OAUTH_KV: KVNamespace;
+  OAUTH_CLIENT_ID: string;
+  OAUTH_CLIENT_SECRET: string;
+  OAUTH_REDIRECT_URIS: string; // comma-separated
+  OAUTH_ISSUER?: string; // optional
 };
 
 function unauthorized(): Response {
@@ -61,19 +71,28 @@ async function rateLimitOrThrow(req: Request, env: Env): Promise<void> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ token, rpm: Number(env.RATE_LIMIT_RPM || "60") })
   });
-  if (res.status === 429) {
-    throw new Error("rate_limit_exceeded");
-  }
+  if (res.status === 429) throw new Error("rate_limit_exceeded");
 }
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
 
+    // ✅ LOG TYLKO DLA /authorize
+    if (url.pathname === "/authorize") {
+      console.log(`[authorize] ${req.method} ${req.url}`);
+    }
+
     if (url.pathname === "/health" && req.method === "GET") {
       return Response.json({ ok: true, version: env.VERSION, ts: new Date().toISOString() }, { status: 200 });
     }
 
+    // ✅ OAuth endpoints (/.well-known, /authorize, /token, /revoke)
+    if (isOAuthPath(url.pathname)) {
+      return handleOAuth(req, env as any);
+    }
+
+    // ✅ MCP route check
     if (!routesMatch(url.pathname)) {
       return new Response("not found", { status: 404 });
     }
@@ -82,11 +101,18 @@ export default {
       return new Response("method not allowed", { status: 405 });
     }
 
+    // ✅ OAuth Bearer for /mcp
     const auth = req.headers.get("Authorization");
     if (!auth || !auth.startsWith("Bearer ")) return unauthorized();
     const bearer = auth.slice("Bearer ".length);
-    if (bearer !== env.MCP_BEARER) return forbidden("invalid bearer");
 
+    // Prefer OAuth token; (optional) allow legacy MCP_BEARER as fallback
+    const okOAuth = await verifyAccessToken(env as any, bearer, "mcp");
+    const okLegacy = bearer === env.MCP_BEARER;
+
+    if (!okOAuth && !okLegacy) return forbidden("invalid bearer");
+
+    // ✅ Rate limit
     try {
       await rateLimitOrThrow(req, env);
     } catch (e) {
