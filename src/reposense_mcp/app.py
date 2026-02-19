@@ -29,6 +29,21 @@ def create_api() -> FastAPI:
     @api.middleware("http")
     async def require_api_key(request: Request, call_next):
         if request.url.path.startswith("/mcp"):
+            # allow preflight / probe
+            if request.method == "OPTIONS":
+                return JSONResponse(
+                    {},
+                    status_code=204,
+                    headers={
+                        "Access-Control-Allow-Origin": request.headers.get("origin", "*"),
+                        "Access-Control-Allow-Methods": "POST, OPTIONS",
+                        "Access-Control-Allow-Headers": request.headers.get(
+                            "access-control-request-headers",
+                            "authorization,content-type,mcp-session-id",
+                        ),
+                    },
+                )
+
             expected = (settings.api_key or "").strip()
             if expected:
                 auth = (request.headers.get("authorization") or "").strip()
@@ -53,6 +68,7 @@ def create_api() -> FastAPI:
                 elapsed_ms=elapsed_ms,
             )
             response.headers["x-request-id"] = rid
+            response.headers["X-Accel-Buffering"] = "no"
             return response
         except Exception:
             elapsed_ms = int((time.perf_counter() - start) * 1000)
