@@ -74,6 +74,36 @@ async function rateLimitOrThrow(req: Request, env: Env): Promise<void> {
   if (res.status === 429) throw new Error("rate_limit_exceeded");
 }
 
+/**
+ * MCP tool-runner w ChatGPT oczekuje CallToolResult:
+ * { content: [{type:"text", text:"..."}], isError?: boolean }
+ * a NIE Twojego ToolEnvelope {ok,data,...}.
+ *
+ * Dlatego mapujemy ToolEnvelope -> CallToolResult (zawsze text).
+ */
+type McpContentBlock = { type: "text"; text: string };
+type McpCallToolResult = { content: McpContentBlock[]; isError?: boolean };
+
+function toMcpCallToolResult(inner: ToolEnvelope): McpCallToolResult {
+  // Uwaga: runner nie akceptuje type:"json" — więc nawet JSON pakujemy w text.
+  const payload = {
+    ok: inner.ok,
+    data: (inner as any).data ?? null,
+    error: (inner as any).error ?? null,
+    meta: (inner as any).meta ?? null,
+    _mcp_version: (inner as any)._mcp_version ?? null
+  };
+
+  const text = typeof payload.data === "string"
+    ? payload.data
+    : JSON.stringify(payload, null, 2);
+
+  return {
+    content: [{ type: "text", text }],
+    isError: !inner.ok
+  };
+}
+
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
@@ -168,6 +198,7 @@ export default {
     if (!okSid) return forbidden("invalid mcp-session-id");
 
     if (method === "tools/list") {
+      // To jest OK jako JSON-RPC result; runner i tak wymaga content dopiero dla tools/call.
       const rpc = jsonResult(id, { tools: toolsList });
       return sseResponse(rpc);
     }
@@ -191,6 +222,7 @@ export default {
       };
 
       try {
+        // Twoje narzędzia zwracają ToolEnvelope (ok/data/meta)
         const inner = await fn({
           env,
           ctx,
@@ -200,14 +232,23 @@ export default {
           cache,
           args: params.arguments
         });
-        const rpc = jsonResult(id, inner);
+
+        // ✅ KLUCZOWA ZMIANA: mapujemy ToolEnvelope -> MCP CallToolResult z content[]
+        const mcpResult = toMcpCallToolResult(inner);
+
+        const rpc = jsonResult(id, mcpResult);
         return sseResponse(rpc);
       } catch (e) {
         const msg = e instanceof Error ? e.message : "unknown error";
         if (msg === "rate_limit_exceeded") {
           return sseResponse(jsonError(id, -32029, "rate limit exceeded"));
         }
-        return sseResponse(jsonResult(id, buildErr(meta, msg, undefined)));
+
+        const inner = buildErr(meta, msg, undefined);
+        const mcpResult = toMcpCallToolResult(inner);
+
+        const rpc = jsonResult(id, mcpResult);
+        return sseResponse(rpc);
       }
     }
 
