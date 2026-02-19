@@ -1,0 +1,40 @@
+name = "reposense-mcp"
+main = "src/index.ts"
+compatibility_date = "2025-02-01"
+
+[vars]
+VERSION = "1.0.0"
+MCP_PROTOCOL_VERSION = "2024-11-05"
+RATE_LIMIT_RPM = "60"
+POLICY_DENY_PATTERNS = "[]"
+POLICY_MAX_FILE_BYTES = "1000000"
+POLICY_MAX_TREE_ITEMS = "5000"
+OAUTH_REDIRECT_URIS = "https://chatgpt.com/connector_platform_oauth_redirect,https://chat.openai.com/connector_platform_oauth_redirect"
+OAUTH_CLIENT_ID = "GENERATE_YOUR_ID"
+CF_ACCESS_TEAM_DOMAIN = "GENERATE_YOUR_ID.cloudflareaccess.com"
+CF_ACCESS_AUD = "GENERATE_YOUR_ID"
+
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "GENERATE_YOUR_ID"
+# preview_id = "GENERATE_YOUR_ID"  # optional
+
+[[kv_namespaces]]
+binding = "CACHE_KV"
+id = "GENERATE_YOUR_ID"
+preview_id = "GENERATE_YOUR_ID"
+
+[[kv_namespaces]]
+binding = "AUTH_KV"
+id = "GENERATE_YOUR_ID"
+preview_id = "GENERATE_YOUR_ID"
+
+[[durable_objects.bindings]]
+name = "RATE_LIMITER"
+class_name = "RateLimiterDO"
+
+[[migrations]]
+tag = "v1"
+# use ONE of these depending on your DO type:
+# new_classes = ["RateLimiterDO"]
+new_sqlite_classes = ["RateLimiterDO"]
