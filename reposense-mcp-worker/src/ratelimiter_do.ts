@@ -1,7 +1,3 @@
-import { sha256Hex } from "./util";
-
-type CheckBody = { token: string; rpm: number };
-
 export class RateLimiterDO {
   private state: DurableObjectState;
 
@@ -13,23 +9,32 @@ export class RateLimiterDO {
     const url = new URL(req.url);
     if (url.pathname !== "/check" || req.method !== "POST") return new Response("not found", { status: 404 });
 
-    const body = (await req.json()) as CheckBody;
-    const token = body.token || "";
-    const rpm = Number(body.rpm || 60);
+    const body = (await req.json().catch(() => null)) as null | { token?: string; rpm?: number };
+    const token = typeof body?.token === "string" ? body.token : "";
+    const rpm = Number.isFinite(body?.rpm) ? Number(body?.rpm) : 60;
+
+    if (!token) return new Response("missing token", { status: 400 });
 
     const now = Date.now();
-    const minute = Math.floor(now / 60000);
-    const tokenHash = await sha256Hex(token);
-    const k = `rl:v1:${tokenHash}:${minute}`;
+    const cutoff = now - 60_000;
 
-    const current = (await this.state.storage.get<number>(k)) ?? 0;
-    const next = current + 1;
-    await this.state.storage.put(k, next);
+    const db = this.state.storage.sql;
 
-    const prevKey = `rl:v1:${tokenHash}:${minute - 2}`;
-    await this.state.storage.delete(prevKey);
+    db.exec("CREATE TABLE IF NOT EXISTS rl (token TEXT NOT NULL, ts INTEGER NOT NULL)");
+    db.exec("CREATE INDEX IF NOT EXISTS rl_token_ts ON rl(token, ts)");
 
-    if (next > rpm) return new Response("rate limited", { status: 429 });
-    return new Response("ok", { status: 200 });
+    db.exec("DELETE FROM rl WHERE token = ? AND ts < ?", token, cutoff);
+
+    let count = 0;
+    for (const row of db.exec<{ c: number }>("SELECT COUNT(1) AS c FROM rl WHERE token = ?", token)) {
+      count = row.c || 0;
+      break;
+    }
+
+    if (count >= rpm) return new Response("rate limited", { status: 429 });
+
+    db.exec("INSERT INTO rl(token, ts) VALUES(?, ?)", token, now);
+
+    return Response.json({ ok: true, remaining: Math.max(0, rpm - (count + 1)) }, { status: 200 });
   }
 }

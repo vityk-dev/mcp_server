@@ -2,8 +2,13 @@ import { buildErr, buildOk, type ToolEnvelope } from "../envelope";
 import type { ToolCtx } from "./registry";
 import { GitHubClient } from "../github/client";
 
-function decodeBase64(content: string): string {
-  return atob(content.replace(/\n/g, ""));
+function decodeBase64Utf8(content: string): string {
+  const clean = content.replace(/\n/g, "").trim();
+  if (!clean) return "";
+  const bin = atob(clean);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
 }
 
 export async function github_read_file(ctx: ToolCtx): Promise<ToolEnvelope> {
@@ -17,13 +22,23 @@ export async function github_read_file(ctx: ToolCtx): Promise<ToolEnvelope> {
   if (cached) return buildOk(ctx.meta, cached);
 
   const gh = new GitHubClient(ctx.env);
-  const res = await gh.request<any>(`/repos/${args.owner}/${args.repo}/contents/${encodeURIComponent(args.path)}?ref=${encodeURIComponent(ref)}`, { method: "GET" });
+  const res = await gh.request<any>(`/repos/${args.owner}/${args.repo}/contents/${encodeURIComponent(args.path)}?ref=${encodeURIComponent(ref)}`, {
+    method: "GET"
+  });
+
   if (res.status >= 400) return buildErr(ctx.meta, `github error ${res.status}`);
   if (res.data?.type !== "file") return buildErr(ctx.meta, "not a file");
+
+  if (res.data?.encoding && String(res.data.encoding) !== "base64") {
+    return buildErr(ctx.meta, `unexpected encoding: ${String(res.data.encoding)}`);
+  }
+
   const size = Number(res.data.size ?? 0);
   if (size > ctx.policy.maxFileBytes) return buildErr(ctx.meta, `file too large: ${size} bytes (max ${ctx.policy.maxFileBytes})`);
-  const content = decodeBase64(String(res.data.content ?? ""));
+
+  const content = decodeBase64Utf8(String(res.data.content ?? ""));
   const out = { owner: args.owner, repo: args.repo, ref, path: args.path, size, content };
+
   await ctx.cache.set("github_read_file", args, "file", out);
   return buildOk(ctx.meta, out);
 }
@@ -41,7 +56,10 @@ export async function github_read_excerpt(ctx: ToolCtx): Promise<ToolEnvelope> {
     no_cache?: boolean;
   };
 
-  const fileRes = await github_read_file({ ...ctx, args: { owner: args.owner, repo: args.repo, path: args.path, ref: args.ref, no_cache: args.no_cache } });
+  const fileRes = await github_read_file({
+    ...ctx,
+    args: { owner: args.owner, repo: args.repo, path: args.path, ref: args.ref, no_cache: args.no_cache }
+  });
   if (!fileRes.ok) return fileRes;
 
   const content = (fileRes.data as any).content as string;

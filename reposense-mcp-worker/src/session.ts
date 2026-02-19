@@ -47,18 +47,22 @@ export async function createSession(secret: string, ttlSeconds: number): Promise
 }
 
 export async function verifySession(secret: string, sid: string): Promise<boolean> {
-  const parts = sid.split(".");
-  if (parts.length !== 2) return false;
-  const [base, sig] = parts as [string, string];
-  if (!base || !sig) return false;
-
-  const expected = await hmacSign(secret, new TextEncoder().encode(base));
-  const got = fromB64url(sig);
-  if (!timingSafeEq(expected, got)) return false;
-
   try {
+    if (!secret) return false;
+
+    const parts = sid.split(".");
+    if (parts.length !== 2) return false;
+
+    const [base, sig] = parts as [string, string];
+    if (!base || !sig) return false;
+
+    const expected = await hmacSign(secret, new TextEncoder().encode(base));
+    const got = fromB64url(sig);
+    if (!timingSafeEq(expected, got)) return false;
+
     const payload = decJson(fromB64url(base)) as SessionPayload;
     if (!payload || typeof payload.exp !== "number") return false;
+
     const now = Math.floor(Date.now() / 1000);
     return now <= payload.exp;
   } catch {

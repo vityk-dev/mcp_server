@@ -10,13 +10,16 @@ export async function deviceStart(env: Env): Promise<{ device_code: string; user
       "accept": "application/json"
     },
     body: new URLSearchParams({
-      client_id: env.GITHUB_CLIENT_ID,
+      client_id: String(env.GITHUB_CLIENT_ID || ""),
       scope: "repo read:user"
     }).toString()
   });
 
-  const json = (await res.json()) as any;
-  if (!json.device_code) throw new Error("failed to start device flow");
+  const text = await res.text();
+  if (!res.ok) throw new Error(`device start failed: ${res.status} ${text}`);
+
+  const json = JSON.parse(text) as any;
+  if (!json.device_code) throw new Error(`device start missing device_code: ${text}`);
 
   return {
     device_code: String(json.device_code),
@@ -47,8 +50,9 @@ export async function devicePoll(
       grant_type: "urn:ietf:params:oauth:grant-type:device_code"
     }).toString()
   });
-
-  const json = (await res.json()) as any;
+  const text = await res.text();
+  if (!res.ok) throw new Error(`device poll failed: ${res.status} ${text}`);
+  const json = JSON.parse(text) as any;
 
   if (json.error) {
     const out: { status: "pending"; error: string; interval?: number } = {

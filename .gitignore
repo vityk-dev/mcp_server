@@ -23,3 +23,5 @@ out/
 # env / secrets
 .env
 .env.*
+reposense-mcp-worker/wrangler.toml
+reposense-mcp-worker/wrangler.toml
