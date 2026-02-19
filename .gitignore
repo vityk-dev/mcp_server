@@ -11,6 +11,8 @@ node_modules/
 # Wrangler / CF
 .wrangler/
 wrangler.toml.local
+.wrangler/
+.dev.vars
 
 dist/
 out/
