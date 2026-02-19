@@ -1,0 +1,8 @@
+{
+  "access_token": "PASTE_YOU_SID",
+  "token_type": "bearer",
+  "expires_in": 28800,
+  "refresh_token": "PASTE_YOU_SID",
+  "refresh_token_expires_in": 15638400,
+  "scope": ""
+}
