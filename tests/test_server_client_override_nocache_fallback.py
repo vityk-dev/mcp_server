@@ -13,10 +13,7 @@ class DummyClientBoom:
 
 @pytest.mark.asyncio
 async def test_no_cache_true_falls_back_to_github_client_override(mcp_client, monkeypatch):
-    # Upewnij się, że nie ma override dla nocache
     monkeypatch.setattr(server_mod, "github_client_nocache", None, raising=True)
-
-    # Ustaw tylko override "github_client"
     monkeypatch.setattr(server_mod, "github_client", DummyClientBoom(), raising=True)
 
     resp = await mcp_client.call_tool(

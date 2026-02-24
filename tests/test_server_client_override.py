@@ -15,7 +15,6 @@ class DummyClientBoom:
 async def test_github_read_file_uses_overridden_github_client_and_wraps_error(
     mcp_client, monkeypatch
 ):
-    # override client in module
     monkeypatch.setattr(server_mod, "github_client", DummyClientBoom(), raising=True)
 
     resp = await mcp_client.call_tool(
@@ -29,14 +28,11 @@ async def test_github_read_file_uses_overridden_github_client_and_wraps_error(
     assert "boom" in err["message"]
     assert err["hint"] == "Check server logs for details."
     assert isinstance(err["details"], dict)
-
-    # meta always present
     assert "meta" in resp.data
     assert "rid" in resp.data["meta"]
     assert resp.data["meta"].get("tool_name") == "github_read_file"
 
 
-# tests/test_server_client_override.py (dopisz niżej)
 class DummyClientTag:
     def __init__(self, tag: str):
         self.tag = tag
@@ -49,8 +45,6 @@ class DummyClientTag:
 async def test_no_cache_uses_nocache_override_when_present(mcp_client, monkeypatch):
     cached = DummyClientTag("cached")
     nocache = DummyClientTag("nocache")
-
-    # Jeśli masz tylko jeden atrybut override, pomiń ten test.
     monkeypatch.setattr(server_mod, "github_client", cached, raising=True)
     monkeypatch.setattr(server_mod, "github_client_nocache", nocache, raising=False)
 
@@ -65,5 +59,3 @@ async def test_no_cache_uses_nocache_override_when_present(mcp_client, monkeypat
 
     assert r1.data["ok"] is True
     assert r2.data["ok"] is True
-    # Tu normalnie byś rozpoznał po efektach ubocznych (np. licznik wywołań),
-    # albo po tym, że DummyClientTag zwraca inne dane.

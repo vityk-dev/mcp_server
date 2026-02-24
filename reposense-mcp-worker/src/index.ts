@@ -14,7 +14,6 @@ type Env = {
   VERSION: string;
   MCP_PROTOCOL_VERSION: string;
 
-  // legacy (you can remove later)
   MCP_BEARER: string;
 
   SESSION_HMAC_SECRET: string;
@@ -74,18 +73,10 @@ async function rateLimitOrThrow(req: Request, env: Env): Promise<void> {
   if (res.status === 429) throw new Error("rate_limit_exceeded");
 }
 
-/**
- * MCP tool-runner w ChatGPT oczekuje CallToolResult:
- * { content: [{type:"text", text:"..."}], isError?: boolean }
- * a NIE Twojego ToolEnvelope {ok,data,...}.
- *
- * Dlatego mapujemy ToolEnvelope -> CallToolResult (zawsze text).
- */
 type McpContentBlock = { type: "text"; text: string };
 type McpCallToolResult = { content: McpContentBlock[]; isError?: boolean };
 
 function toMcpCallToolResult(inner: ToolEnvelope): McpCallToolResult {
-  // Uwaga: runner nie akceptuje type:"json" — więc nawet JSON pakujemy w text.
   const payload = {
     ok: inner.ok,
     data: (inner as any).data ?? null,
@@ -108,7 +99,7 @@ export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
 
-    // ✅ LOG TYLKO DLA /authorize
+    // LOG /authorize
     if (url.pathname === "/authorize") {
       console.log(`[authorize] ${req.method} ${req.url}`);
     }
@@ -117,12 +108,12 @@ export default {
       return Response.json({ ok: true, version: env.VERSION, ts: new Date().toISOString() }, { status: 200 });
     }
 
-    // ✅ OAuth endpoints (/.well-known, /authorize, /token, /revoke)
+    // OAuth endpoints (/.well-known, /authorize, /token, /revoke)
     if (isOAuthPath(url.pathname)) {
       return handleOAuth(req, env as any);
     }
 
-    // ✅ MCP route check
+    // MCP route check
     if (!routesMatch(url.pathname)) {
       return new Response("not found", { status: 404 });
     }
@@ -131,18 +122,17 @@ export default {
       return new Response("method not allowed", { status: 405 });
     }
 
-    // ✅ OAuth Bearer for /mcp
+    // OAuth Bearer for /mcp
     const auth = req.headers.get("Authorization");
     if (!auth || !auth.startsWith("Bearer ")) return unauthorized();
     const bearer = auth.slice("Bearer ".length);
 
-    // Prefer OAuth token; (optional) allow legacy MCP_BEARER as fallback
     const okOAuth = await verifyAccessToken(env as any, bearer, "mcp");
     const okLegacy = bearer === env.MCP_BEARER;
 
     if (!okOAuth && !okLegacy) return forbidden("invalid bearer");
 
-    // ✅ Rate limit
+    // Rate limit
     try {
       await rateLimitOrThrow(req, env);
     } catch (e) {
@@ -198,7 +188,6 @@ export default {
     if (!okSid) return forbidden("invalid mcp-session-id");
 
     if (method === "tools/list") {
-      // To jest OK jako JSON-RPC result; runner i tak wymaga content dopiero dla tools/call.
       const rpc = jsonResult(id, { tools: toolsList });
       return sseResponse(rpc);
     }
@@ -222,7 +211,6 @@ export default {
       };
 
       try {
-        // Twoje narzędzia zwracają ToolEnvelope (ok/data/meta)
         const inner = await fn({
           env,
           ctx,
@@ -233,7 +221,6 @@ export default {
           args: params.arguments
         });
 
-        // ✅ KLUCZOWA ZMIANA: mapujemy ToolEnvelope -> MCP CallToolResult z content[]
         const mcpResult = toMcpCallToolResult(inner);
 
         const rpc = jsonResult(id, mcpResult);

@@ -48,11 +48,10 @@ properties:
           - name: REPOSENSE_EXPOSE_TOKENS
             value: "false"
 
-          # Bearer auth to MCP (your middleware)
           - name: REPOSENSE_API_KEY
             secretRef: api-key
 
-          # GitHub OAuth/device flow (if you use it)
+          # GitHub OAuth/device flow 
           - name: REPOSENSE_GITHUB_APP_CLIENT_ID
             secretRef: github-client-id
           - name: REPOSENSE_GITHUB_APP_CLIENT_SECRET

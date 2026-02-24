@@ -29,36 +29,18 @@ mcp = FastMCP("RepoSense MCP")
 register_prompts(mcp)
 
 
-# -------------------------
 # Cache helpers
-# -------------------------
 def _cache_instance():
     ttl = float(getattr(settings, "cache_ttl_seconds", 300.0))
     max_items = int(getattr(settings, "cache_max_items", 2048))
     return default_cache(ttl_seconds=ttl, max_items=max_items)
 
 
-# -------------------------
 # Process-wide GitHub clients
-# -------------------------
 _gh_lock = threading.Lock()
 _gh_cached: GitHubClient | None = None
 _gh_nocache: GitHubClient | None = None
-
-# Shared, process-wide rate-limit tracker so that BOTH clients (cached + nocache)
-# contribute to the same observed snapshots.
-
 _gh_rate_limit_tracker = default_rate_limit_tracker()
-
-# -------------------------------------------------------------------
-# Backwards-compat test hooks
-# -------------------------------------------------------------------
-# Older tests monkeypatch `reposense_mcp.server.github_client` expecting tools
-# to use it directly. The newer implementation uses `_get_github_client()`.
-# Keep these module globals as optional overrides for test monkeypatching.
-#
-# If set (non-None), `_get_github_client()` will return these instances
-# instead of constructing/using the shared process-wide clients.
 github_client: Any | None = None
 github_client_nocache: Any | None = None
 
@@ -77,12 +59,11 @@ def _get_github_client(*, no_cache: bool = False) -> GitHubClient:
     global _gh_cached, _gh_nocache
     with _gh_lock:
         # Test override: allow monkeypatching `reposense_mcp.server.github_client`
-        # (and optionally `github_client_nocache`) to force a specific client.
         global github_client, github_client_nocache
         if no_cache:
             if github_client_nocache is not None:
                 return github_client_nocache  # type: ignore[return-value]
-            # Fallback: older tests only monkeypatch `github_client`.
+
             if github_client is not None:
                 return github_client  # type: ignore[return-value]
         else:
@@ -94,7 +75,6 @@ def _get_github_client(*, no_cache: bool = False) -> GitHubClient:
 
         if _gh_nocache is None:
             _gh_nocache = GitHubClient(rate_limit_tracker=_gh_rate_limit_tracker)
-            # Disable cache permanently for this instance.
             try:
                 _gh_nocache._cache = None  # type: ignore[attr-defined]
             except Exception:
@@ -131,7 +111,6 @@ async def aclose_github_clients() -> None:
         try:
             await gh.aclose()
         except Exception:
-            # Never fail shutdown
             pass
 
 
@@ -147,9 +126,7 @@ def _try_schedule_aclose() -> None:
         pass
 
 
-# -------------------------
 # Request id / logging
-# -------------------------
 def _resolve_request_id() -> str:
     """
     Resolve a request id for logging.
@@ -193,7 +170,6 @@ def _log_tool(tool: str, start: float, result: dict, **fields: Any) -> None:
         log.warning("tool_call", **payload, error_code=code)
 
 
-# -------------------------
 # Helper: best-effort rate-limit snapshot for response metadata
 def _best_effort_rate_limit(*, no_cache: bool = False) -> dict[str, Any] | None:
     """Return last observed rate-limit snapshot (best effort).
@@ -209,9 +185,7 @@ def _best_effort_rate_limit(*, no_cache: bool = False) -> dict[str, Any] | None:
         return None
 
 
-# -------------------------
 # Tools
-# -------------------------
 @mcp.tool
 def ping(message: str | None = None) -> dict[str, Any]:
     start = time.perf_counter()
@@ -296,30 +270,22 @@ def github_auth_status() -> dict[str, Any]:
     rid = _resolve_request_id()
     try:
         auth = GitHubDeviceAuth(load_github_oauth_config())
-        st = auth.status()  # {"authorized": bool, "token": {...}} albo {"authorized": False, ...}
+        st = auth.status()  # {"authorized": bool, "token": {...}} or {"authorized": False, ...}
 
         token = st.get("token")
         authorized = bool(st.get("authorized"))
-
-        # Domyślnie zachowaj kompatybilność z testami:
-        # - zwracaj tokeny w TESTACH / DEBUG, ale nie w produkcji.
         expose = False
-
-        # 1) pytest ustawia zmienną środowiskową PYTEST_CURRENT_TEST
         import os
 
         if os.getenv("PYTEST_CURRENT_TEST"):
             expose = True
 
-        # 2) można też jawnie włączyć lokalnie: REPOSENSE_EXPOSE_TOKENS=1
         if getattr(settings, "expose_tokens", False) is True:
             expose = True
 
         if expose:
-            # kompatybilność wstecz: zwróć dokładnie co dawał auth.status()
             out = ok(st, tool_name="github_auth_status", rid=rid)
         else:
-            # prod-safe: bez tokenów
             safe: dict[str, Any] = {"authorized": authorized}
 
             if isinstance(token, dict):
@@ -577,7 +543,6 @@ async def github_read_excerpt(
     start = time.perf_counter()
     rid = _resolve_request_id()
     try:
-        # --- validate mode ---
         modes = 0
         if head_lines is not None:
             modes += 1
@@ -726,14 +691,10 @@ def github_auth_logout() -> dict[str, Any]:
 
     warnings: list[str] = []
     logout_result: dict[str, Any] = {}
-
-    # Best-effort: spróbuj “pełnego” logoutu (wymaga configu),
-    # ale jeśli configu brak — nadal chcemy wyczyścić token lokalny i cache.
     try:
         auth = GitHubDeviceAuth(load_github_oauth_config())
         logout_result = auth.logout() or {}
     except Exception as e:
-        # fallback: usuń token lokalnie, bez configu
         try:
             TokenStore().clear()
             logout_result = {"logged_out": True, "method": "token_store_clear"}
@@ -743,7 +704,6 @@ def github_auth_logout() -> dict[str, Any]:
 
         warnings.append(f"logout_auth_unavailable: {e}")
 
-    # Zawsze: wyczyść cache i zamknij klientów
     try:
         _cache_instance().clear()
     except Exception as e:
@@ -821,7 +781,6 @@ def github_rate_limit_status(no_cache: bool = False) -> dict[str, Any]:
     start = time.perf_counter()
     rid = _resolve_request_id()
     try:
-        # Ensure at least one client exists (so token fingerprint can be computed)
         gh = _get_github_client(no_cache=no_cache)
         st = gh.rate_limit_status()  # reads from shared tracker
 

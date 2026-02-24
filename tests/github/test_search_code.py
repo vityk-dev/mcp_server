@@ -7,10 +7,7 @@ import respx
 @pytest.mark.asyncio
 @respx.mock
 async def test_github_search_code_basic(mcp_client, monkeypatch, tmp_path):
-    # token store -> temp HOME (tak jak w innych testach)
     monkeypatch.setenv("HOME", str(tmp_path))
-
-    # Udawany token zapisany tak jak robi to TokenStore (jeśli masz inny format, dopasuj)
     token_dir = tmp_path / ".reposense_mcp"
     token_dir.mkdir(parents=True, exist_ok=True)
     (token_dir / "github_token.json").write_text('{"access_token":"tok_test"}', encoding="utf-8")

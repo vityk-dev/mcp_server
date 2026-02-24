@@ -18,7 +18,6 @@ def _int(v: str | None) -> int | None:
 
 
 def _lower_get(headers: Mapping[str, str], key: str) -> str | None:
-    # httpx headers are case-insensitive, but keep it robust for generic mappings
     try:
         v = headers.get(key)  # type: ignore[attr-defined]
         if v is not None:

@@ -14,11 +14,7 @@ class CacheStats:
     hits: int = 0
     misses: int = 0
     sets: int = 0
-
-    # Legacy total evictions (kept for backward compatibility)
     evictions: int = 0
-
-    # More detailed breakdown
     expired: int = 0
     capacity_evictions: int = 0
 
@@ -48,20 +44,16 @@ class TTLCache:
         self.max_items = int(max_items)
 
         self._lock = threading.Lock()
-        # key -> (expires_at_monotonic, value). Ordered by recency (LRU).
         self._items: OrderedDict[str, tuple[float, Any]] = OrderedDict()
-        # Min-heap of (expires_at_monotonic, key) for efficient expiry purge.
         self._exp_heap: list[tuple[float, str]] = []
 
         self._stats = CacheStats()
 
     def _now(self) -> float:
-        # monotonic is safe vs system clock changes
         return time.monotonic()
 
     def _maybe_compact_heap_locked(self) -> None:
         """Rebuild the expiry heap if it accumulates too many stale entries."""
-        # Heuristic: if heap is much larger than live items, rebuild it.
         if len(self._exp_heap) > (len(self._items) * 4 + 128):
             self._exp_heap = [(exp, k) for k, (exp, _) in self._items.items()]
             heapq.heapify(self._exp_heap)
@@ -92,7 +84,6 @@ class TTLCache:
 
             exp, value = item
             if exp <= now:
-                # Should be rare (heap purge would normally remove it), but be safe.
                 self._items.pop(key, None)
                 self._stats.misses += 1
                 self._stats.expired += 1
@@ -126,7 +117,6 @@ class TTLCache:
                 self._items.popitem(last=False)
                 self._stats.capacity_evictions += 1
                 self._stats.evictions += 1
-                # Note: we do not remove from heap here; stale entries are ignored.
 
             # Prevent unbounded heap growth due to stale entries.
             self._maybe_compact_heap_locked()

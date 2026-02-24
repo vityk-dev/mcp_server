@@ -13,13 +13,11 @@ from reposense_mcp.config import settings
 
 
 def _add_timestamp(_: Any, __: str, event_dict: dict[str, Any]) -> dict[str, Any]:
-    # epoch milliseconds (compact + easy to index)
     event_dict["ts_ms"] = int(time.time() * 1000)
     return event_dict
 
 
 def _add_level(_: Any, __: str, event_dict: dict[str, Any]) -> dict[str, Any]:
-    # structlog adds level later, but we normalize naming
     if "level" not in event_dict and "log_level" in event_dict:
         event_dict["level"] = event_dict.pop("log_level")
     return event_dict
@@ -39,7 +37,6 @@ def configure_logging() -> None:
     root = logging.getLogger()
     root.setLevel(level)
 
-    # Keep non-stdout handlers (e.g., pytest caplog) intact.
     # Remove only StreamHandlers that write to sys.stdout, then re-add ours once.
     kept: list[logging.Handler] = []
     for h in root.handlers:
@@ -50,7 +47,6 @@ def configure_logging() -> None:
 
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(level)
-    # Keep stdlib logs readable but minimal; structlog will emit JSON
     handler.setFormatter(logging.Formatter("%(message)s"))
     root.addHandler(handler)
 

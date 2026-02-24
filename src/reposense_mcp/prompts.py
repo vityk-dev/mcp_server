@@ -17,10 +17,6 @@ Output format (strict):
 
 
 def register_prompts(mcp: FastMCP) -> None:
-    # ----------------------------
-    # Core / existing prompts
-    # ----------------------------
-
     @mcp.prompt()
     async def analyze_repo(owner: str, repo: str, ref: str = "HEAD") -> str:
         return f"""
@@ -142,10 +138,7 @@ Create a table comparing:
 {_output_format_block()}
 """.strip()
 
-    # ----------------------------
-    # New “advanced” prompts
-    # ----------------------------
-
+    # New prompts
     @mcp.prompt()
     async def analyze_dependencies(
         owner: str,
@@ -408,10 +401,6 @@ Base: **{base_ref}**
 
 {_output_format_block()}
 """.strip()
-
-    # ----------------------------
-    # Extra “engineering workflow” prompts
-    # ----------------------------
 
     @mcp.prompt()
     async def find_entrypoints(owner: str, repo: str, ref: str = "HEAD") -> str:

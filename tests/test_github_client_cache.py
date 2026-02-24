@@ -21,12 +21,10 @@ async def test_repo_tree_tree_call_is_cached(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     _write_token(tmp_path)
 
-    # refs call (NOT cached)
     refs_route = respx.get("https://api.github.com/repos/acme/demo/git/refs/heads/main").mock(
         return_value=httpx.Response(200, json={"object": {"sha": "abc123"}})
     )
 
-    # tree call (cached)
     tree_route = respx.get("https://api.github.com/repos/acme/demo/git/trees/abc123").mock(
         return_value=httpx.Response(200, json={"sha": "abc123", "tree": []})
     )
@@ -36,10 +34,8 @@ async def test_repo_tree_tree_call_is_cached(monkeypatch, tmp_path):
     await gh.repo_tree("acme", "demo", "main")
     await gh.repo_tree("acme", "demo", "main")
 
-    # refs happens twice (by design)
     assert refs_route.call_count == 2
 
-    # tree happens once (cache)
     assert tree_route.call_count == 1
 
 
@@ -49,7 +45,6 @@ async def test_repo_tree_is_cached(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     _write_token(tmp_path)
 
-    # branch -> sha (not cached by design)
     ref_route = respx.get("https://api.github.com/repos/acme/demo/git/refs/heads/main").mock(
         return_value=httpx.Response(200, json={"object": {"sha": "abc123"}})
     )

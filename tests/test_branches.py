@@ -53,7 +53,6 @@ async def test_list_branches_pagination(monkeypatch, tmp_path, mcp_client):
     monkeypatch.setenv("HOME", str(tmp_path))
     _write_token(tmp_path)
 
-    # page=1 (pełne per_page)
     respx.get(
         "https://api.github.com/repos/acme/demo/branches",
         params={"per_page": 100, "page": 1},
@@ -64,7 +63,6 @@ async def test_list_branches_pagination(monkeypatch, tmp_path, mcp_client):
         )
     )
 
-    # page=2 (ostatnia)
     respx.get(
         "https://api.github.com/repos/acme/demo/branches",
         params={"per_page": 100, "page": 2},

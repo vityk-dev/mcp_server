@@ -42,8 +42,6 @@ class TokenStore:
 
     def save(self, token: TokenData) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Atomic-ish write: write to temp then replace.
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp.write_text(json.dumps(token.__dict__, indent=2), encoding="utf-8")
         tmp.replace(self.path)
@@ -51,8 +49,6 @@ class TokenStore:
         try:
             os.chmod(self.path, 0o600)
         except PermissionError:
-            # On some platforms/filesystems (or when not running as owner),
-            # chmod can fail; ignore safely.
             pass
 
     def clear(self) -> None:

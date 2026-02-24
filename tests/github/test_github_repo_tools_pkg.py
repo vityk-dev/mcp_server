@@ -16,7 +16,6 @@ async def mcp_client():
 
 
 def _write_token(tmp_path: Path):
-    # create token file expected by TokenStore under HOME/.reposense_mcp/github_token.json
     token_dir = tmp_path / ".reposense_mcp"
     token_dir.mkdir(parents=True, exist_ok=True)
     (token_dir / "github_token.json").write_text('{"access_token":"tok_test"}', encoding="utf-8")
@@ -27,12 +26,10 @@ async def test_repo_tree(mcp_client, monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     _write_token(tmp_path)
 
-    # branch -> sha (because client resolves refs now)
     respx.get("https://api.github.com/repos/acme/demo/git/refs/heads/main").mock(
         return_value=httpx.Response(200, json={"object": {"sha": "abc"}})
     )
 
-    # sha -> tree
     respx.get("https://api.github.com/repos/acme/demo/git/trees/abc").mock(
         return_value=httpx.Response(
             200,

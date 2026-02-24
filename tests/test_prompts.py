@@ -14,31 +14,27 @@ def _prompt_names(mcp: FastMCP) -> set[str]:
     if pm is None:
         raise AssertionError("FastMCP instance has no _prompt_manager; FastMCP API changed?")
 
-    # Try common shapes across versions:
-    # 1) pm.prompts: dict[name, Prompt] or list[Prompt]
     prompts_attr = getattr(pm, "prompts", None)
     if prompts_attr is not None:
         if isinstance(prompts_attr, dict):
             return set(prompts_attr.keys())
         if isinstance(prompts_attr, list):
             return {p.name for p in prompts_attr if hasattr(p, "name")}
-        # Some versions might store an iterable
         try:
             return {p.name for p in prompts_attr if hasattr(p, "name")}  # type: ignore[operator]
         except TypeError:
             pass
 
-    # 2) pm._prompts: dict[name, Prompt]
+    # pm._prompts: dict[name, Prompt]
     prompts_dict = getattr(pm, "_prompts", None)
     if isinstance(prompts_dict, dict):
         return set(prompts_dict.keys())
 
-    # 3) pm._handlers: dict[name, callable]
+    # pm._handlers: dict[name, callable]
     handlers = getattr(pm, "_handlers", None)
     if isinstance(handlers, dict):
         return set(handlers.keys())
 
-    # 4) Last resort: scan attributes for dicts keyed by name
     for attr_name in ("_registry", "registry", "_items", "items"):
         maybe = getattr(pm, attr_name, None)
         if isinstance(maybe, dict) and all(isinstance(k, str) for k in maybe.keys()):

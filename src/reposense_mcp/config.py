@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     cache_log_events: bool = False
     cache_log_keys: bool = False
 
-    # ---- Rate limit tracking ----
+    # Rate Limit Tracking
     github_rate_limit_log: bool = False
     github_rate_limit_warn_remaining: int = 50
 

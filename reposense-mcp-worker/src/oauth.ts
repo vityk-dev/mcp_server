@@ -7,16 +7,6 @@ type Env = {
   OAUTH_CLIENT_SECRET: string;
   OAUTH_REDIRECT_URIS: string; // comma-separated
   OAUTH_ISSUER?: string;
-
-  /**
-   * Cloudflare Access team domain, e.g.:
-   *   mcpreposense.cloudflareaccess.com
-   *
-   * If set, we will verify the Access JWT signature against:
-   *   https://<TEAM_DOMAIN>/cdn-cgi/access/certs
-   *
-   * If NOT set, we fall back to a lighter check (presence of CF_Authorization cookie / assertion header).
-   */
   CF_ACCESS_TEAM_DOMAIN?: string;
 };
 
@@ -93,9 +83,6 @@ type StoredAccessToken = {
   exp: number; // epoch sec
 };
 
-// -----------------------------
-// OAuth routing helpers
-// -----------------------------
 
 export function isOAuthPath(pathname: string): boolean {
   return (
@@ -105,7 +92,6 @@ export function isOAuthPath(pathname: string): boolean {
     pathname === "/.well-known/oauth-authorization-server" ||
     pathname === "/.well-known/openid-configuration" ||
     pathname === "/.well-known/oauth-protected-resource" ||
-    // some clients request under /mcp prefix:
     pathname === "/.well-known/oauth-authorization-server/mcp" ||
     pathname === "/.well-known/openid-configuration/mcp" ||
     pathname === "/.well-known/oauth-protected-resource/mcp" ||
@@ -115,10 +101,7 @@ export function isOAuthPath(pathname: string): boolean {
   );
 }
 
-// -----------------------------
 // Cloudflare Access verification
-// -----------------------------
-
 function getCookieValue(cookieHeader: string, name: string): string | null {
   // very small cookie parser (no deps)
   const parts = cookieHeader.split(";").map((p) => p.trim());
@@ -146,7 +129,6 @@ function b64urlToBytes(input: string): Uint8Array {
   return out;
 }
 
-// ✅ Helper: turn Uint8Array into a real ArrayBuffer (TS-friendly BufferSource)
 function toArrayBuffer(u8: Uint8Array): ArrayBuffer {
   const copy = new Uint8Array(u8.byteLength);
   copy.set(u8);
@@ -189,7 +171,6 @@ async function fetchAccessJwks(env: Env): Promise<Jwks | null> {
 
 async function importRsaJwk(jwk: Jwk): Promise<CryptoKey> {
   // Cloudflare Access certs are typically RSA keys.
-  // We verify RS256 (RSASSA-PKCS1-v1_5 + SHA-256).
   return crypto.subtle.importKey(
     "jwk",
     jwk as JsonWebKey,
@@ -233,7 +214,6 @@ async function verifyAccessJwtSignature(env: Env, jwt: string): Promise<boolean>
 
   if (!ok) return false;
 
-  // Basic exp check
   try {
     const payload = decodeJwtPartJson(p);
     const exp = Number(payload?.exp || 0);
@@ -244,14 +224,6 @@ async function verifyAccessJwtSignature(env: Env, jwt: string): Promise<boolean>
   }
 }
 
-/**
- * ✅ Cloudflare Access gate (for /authorize)
- *
- * You MUST protect /authorize in Zero Trust -> Access -> Applications,
- * but we still do a runtime check here:
- * - If CF_ACCESS_TEAM_DOMAIN is set -> verify JWT signature
- * - Else -> require presence of CF_Authorization cookie or assertion header
- */
 async function isAuthorizedUser(req: Request, env: Env): Promise<boolean> {
   const cookie = req.headers.get("cookie") || "";
   const cookieJwt = getCookieValue(cookie, "CF_Authorization") || "";
@@ -273,15 +245,11 @@ async function isAuthorizedUser(req: Request, env: Env): Promise<boolean> {
   return true;
 }
 
-// -----------------------------
 // OAuth handler
-// -----------------------------
-
 export async function handleOAuth(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
 
-  // ---- Well-known endpoints ----
   if (
     path === "/.well-known/oauth-authorization-server" ||
     path === "/.well-known/oauth-authorization-server/mcp" ||
@@ -341,9 +309,7 @@ export async function handleOAuth(req: Request, env: Env): Promise<Response> {
     );
   }
 
-  // ---- /authorize ----
   if (path === "/authorize") {
-    // (you asked for logging only here)
     console.log("[oauth] /authorize url =", req.url);
 
     if (req.method !== "GET") return new Response("method not allowed", { status: 405 });
@@ -359,8 +325,6 @@ export async function handleOAuth(req: Request, env: Env): Promise<Response> {
     if (response_type !== "code") return badRequest("response_type must be code");
     if (client_id !== env.OAUTH_CLIENT_ID) return badRequest("unknown client_id");
     if (!isValidRedirectUri(env, redirect_uri)) return badRequest("redirect_uri not allowed");
-
-    // ✅ Require Cloudflare Access (no more allow=1)
     const ok = await isAuthorizedUser(req, env);
     if (!ok) {
       return new Response(
@@ -380,7 +344,6 @@ export async function handleOAuth(req: Request, env: Env): Promise<Response> {
     return Response.redirect(cb.toString(), 302);
   }
 
-  // ---- /token ----
   if (path === "/token") {
     if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
 
@@ -420,7 +383,6 @@ export async function handleOAuth(req: Request, env: Env): Promise<Response> {
     if (stored.client_id !== client_id) return badRequest("code client mismatch");
     if (stored.redirect_uri !== redirect_uri) return badRequest("redirect_uri mismatch");
 
-    // one-time use: delete code
     await env.OAUTH_KV.delete(`code:${code}`);
 
     const access_token = randB64url(32);
@@ -438,7 +400,6 @@ export async function handleOAuth(req: Request, env: Env): Promise<Response> {
     return Response.json(resp, { status: 200 });
   }
 
-  // ---- /revoke (optional) ----
   if (path === "/revoke") {
     if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
     const form = await req.formData().catch(() => null);
@@ -451,10 +412,7 @@ export async function handleOAuth(req: Request, env: Env): Promise<Response> {
   return new Response("not found", { status: 404 });
 }
 
-// -----------------------------
 // Validate access token for /mcp
-// -----------------------------
-
 export async function verifyAccessToken(env: Env, bearer: string, requiredScope = "mcp"): Promise<boolean> {
   if (!bearer) return false;
   const tok = await kvGetJson<StoredAccessToken>(env, `token:${bearer}`);

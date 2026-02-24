@@ -75,7 +75,6 @@ class GitHubClient:
 
         self._http = httpx.AsyncClient(timeout=self.cfg.timeout_s)
 
-        # IMPORTANT: this must be a real singleton/shared tracker to satisfy option A across clients
         self._rl = rate_limit_tracker or default_rate_limit_tracker()
 
     async def aclose(self) -> None:
@@ -126,9 +125,7 @@ class GitHubClient:
             return
         log.info(event, rid=ensure_request_id(), **fields)
 
-    # ---------------------------
     # Rate limit tracking
-    # ---------------------------
     def _current_token_fp(self) -> str:
         try:
             return _token_fingerprint(self._token())
@@ -231,9 +228,7 @@ class GitHubClient:
             details=details,
         )
 
-    # ---------------------------
     # Logging helpers
-    # ---------------------------
     def _log_http_error(
         self,
         *,
@@ -301,9 +296,7 @@ class GitHubClient:
             **(extra or {}),
         )
 
-    # ---------------------------
     # API calls
-    # ---------------------------
     async def resolve_ref_to_sha(self, owner: str, repo: str, ref: str) -> str:
         ref = ref.strip()
         if self._looks_like_sha(ref):
@@ -554,7 +547,7 @@ class GitHubClient:
         query: str,
         repo: str | None = None,  # "owner/repo"
         language: str | None = None,  # "python"
-        path: str | None = None,  # "src/" albo "server.py"
+        path: str | None = None,  # "src/"
         max_results: int = 10,
     ) -> dict[str, Any]:
         q = (query or "").strip()
@@ -577,8 +570,6 @@ class GitHubClient:
 
         search_query = " ".join(q_parts)
         url = f"{self.cfg.api_base}/search/code"
-
-        # Text matches require special Accept
         headers = self._headers(
             accept="application/vnd.github+json, application/vnd.github.text-match+json"
         )
@@ -854,7 +845,6 @@ class GitHubClient:
                     }
                 )
 
-            # koniec paginacji (ostatnia strona)
             if len(data) < per_page:
                 break
 

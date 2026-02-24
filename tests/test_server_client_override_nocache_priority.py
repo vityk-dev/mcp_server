@@ -18,7 +18,6 @@ class DummyClientBoomB:
 
 @pytest.mark.asyncio
 async def test_no_cache_true_prefers_github_client_nocache_override(mcp_client, monkeypatch):
-    # ustaw oba override
     monkeypatch.setattr(server_mod, "github_client", DummyClientBoomA(), raising=True)
     monkeypatch.setattr(server_mod, "github_client_nocache", DummyClientBoomB(), raising=True)
 
@@ -30,6 +29,5 @@ async def test_no_cache_true_prefers_github_client_nocache_override(mcp_client, 
     assert resp.data["ok"] is False
     err = resp.data["error"]
     assert err["code"] == "internal_error"
-    # ma polecieć z nocache override (boom-b), nie z cached (boom-a)
     assert "boom-b" in err["message"]
     assert "boom-a" not in err["message"]

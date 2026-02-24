@@ -29,7 +29,6 @@ def tool_logged(tool_name: str):
             rid = get_request_id()
             start = time.perf_counter()
 
-            # pick a small subset of kwargs to log (avoid tokens + secrets)
             fields = {"rid": rid, "tool": tool_name}
             for k in ("owner", "repo", "ref", "path", "query"):
                 if k in kwargs and kwargs[k] is not None:

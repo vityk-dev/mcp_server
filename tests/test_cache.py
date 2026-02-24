@@ -38,17 +38,12 @@ class TTLCache:
     def __init__(self, ttl_seconds: float = 30.0, max_items: int = 2048):
         self.ttl_seconds = float(ttl_seconds)
         self.max_items = int(max_items)
-
         self._lock = threading.Lock()
-        # key -> (expires_at, value) ordered by recency
         self._items: OrderedDict[str, tuple[float, Any]] = OrderedDict()
-        # heap entries: (expires_at, key)
         self._exp_heap: list[tuple[float, str]] = []
-
         self._stats = CacheStats()
 
     def _now(self) -> float:
-        # IMPORTANT: tests monkeypatch time.time in this module
         return time.time()
 
     def _purge_expired_locked(self, now: float) -> None:
@@ -58,7 +53,6 @@ class TTLCache:
             if cur is None:
                 continue
             cur_exp, _ = cur
-            # purge only if heap entry matches current expiry
             if cur_exp == exp and cur_exp <= now:
                 self._items.pop(key, None)
                 self._stats.evictions += 1
@@ -80,7 +74,6 @@ class TTLCache:
                 self._stats.evictions += 1
                 return None
 
-            # LRU bump
             self._items.move_to_end(key, last=True)
             self._stats.hits += 1
             return value
@@ -101,11 +94,9 @@ class TTLCache:
             heapq.heappush(self._exp_heap, (exp, key))
             self._stats.sets += 1
 
-            # LRU eviction
             while len(self._items) > self.max_items:
                 self._items.popitem(last=False)
                 self._stats.evictions += 1
-                # heap cleanup is lazy (stale entries ignored)
 
     def delete(self, key: str) -> bool:
         with self._lock:
