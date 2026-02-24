@@ -28,3 +28,6 @@ tokenstore.json
 reposense-mcp-worker/wrangler.toml
 reposense-mcp-worker/wrangler.toml.local
 reposense-mcp-worker/.dev.vars
+
+# Scripts (internal helpers)
+scripts/
